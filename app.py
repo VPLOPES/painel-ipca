@@ -197,9 +197,19 @@ st.divider()
 tab1, tab2, tab3 = st.tabs(["📈 Gráfico", "📅 Matriz", "📋 Tabela"])
 
 with tab1:
+    # 1. Prepara os dados base (remove vazios e ordena)
     df_chart = df.dropna(subset=['acum_12m']).sort_values('data_date')
+    
+    # --- FILTRO DE DATA (A NOVIDADE) ---
+    # Se for IGP-M, filtramos para mostrar apenas de 2000 para frente.
+    # Isso remove a distorção da hiperinflação dos anos 90.
+    if "IGP-M" in tipo_indice:
+        df_chart = df_chart[df_chart['ano'].astype(int) >= 2000]
+    
+    # 2. Cria o gráfico com os dados filtrados
     fig = px.line(df_chart, x='data_date', y='acum_12m', title=f"Evolução {tipo_indice} (12 meses)")
     fig.update_traces(line_color=cor_tema, line_width=3)
+    
     st.plotly_chart(fig, use_container_width=True)
 
 with tab2:

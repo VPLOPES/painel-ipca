@@ -5,6 +5,8 @@ import numpy as np
 import plotly.express as px
 from datetime import date
 import requests
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(
@@ -87,31 +89,41 @@ def get_focus_data():
 def get_currency_realtime():
     try:
         url = "https://economia.awesomeapi.com.br/last/USD-BRL,EUR-BRL"
-        response = requests.get(url, timeout=5)
+        # Adicionamos headers para simular um navegador
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'
+        }
+        response = requests.get(url, headers=headers, timeout=5)
+        
+        # Verifica se a requisição deu certo (código 200)
+        response.raise_for_status()
+        
         data = response.json()
         df = pd.DataFrame.from_dict(data, orient='index')
         return df
-    except:
+    except Exception as e:
+        # Dica: Se quiser ver o erro real no terminal, descomente a linha abaixo:
+        # print(f"Erro na API de Moedas: {e}")
         return pd.DataFrame()
 
 # 5. NOVO: Histórico de Câmbio (BCB - Séries Diárias)
 @st.cache_data(ttl=86400) # Cache de 24h
 def get_cambio_historico():
     try:
-        # O segredo: Fingir ser um navegador (Chrome) para o BCB não bloquear
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         }
         
-        # URLs (usando HTTPS)
+        # URLs (SGS do BCB)
         url_usd = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.1/dados?formato=json"
         url_eur = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.21619/dados?formato=json"
         
-        # Baixando com requests e headers
-        resp_usd = requests.get(url_usd, headers=headers, timeout=10)
-        df_usd = pd.DataFrame(resp_usd.json())
+        # IMPORTANTE: verify=False pula a checagem de SSL do governo que costuma falhar
+        resp_usd = requests.get(url_usd, headers=headers, timeout=15, verify=False)
+        resp_eur = requests.get(url_eur, headers=headers, timeout=15, verify=False)
         
-        resp_eur = requests.get(url_eur, headers=headers, timeout=10)
+        # Converte para DataFrame
+        df_usd = pd.DataFrame(resp_usd.json())
         df_eur = pd.DataFrame(resp_eur.json())
         
         # Tratamento USD
@@ -124,16 +136,16 @@ def get_cambio_historico():
         df_eur = df_eur.rename(columns={'valor': 'Euro'})
         df_eur = df_eur.set_index('data')
         
-        # Juntar tudo e filtrar a partir do Plano Real (01/07/1994)
+        # Juntar tudo e filtrar a partir do Plano Real
         df_final = df_usd.join(df_eur, how='outer')
         df_final = df_final[df_final.index >= '1994-07-01']
         
-        # Preencher buracos (fins de semana) com o valor anterior para o gráfico não quebrar
+        # Preencher buracos (ffill) para fins de semana
         df_final = df_final.ffill()
         
         return df_final
     except Exception as e:
-        print(f"Erro ao baixar histórico de câmbio: {e}")
+        print(f"Erro ao baixar histórico de câmbio: {e}") # Isso vai aparecer no seu terminal/log
         return pd.DataFrame()
 
 # 6. Processamento Comum

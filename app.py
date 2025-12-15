@@ -332,84 +332,83 @@ with st.expander("💸 Histórico de Câmbio (Dólar e Euro desde 1994)", expand
         # --- 2. CRIAÇÃO DAS ABAS ---
         tab_graf, tab_matriz, tab_tabela = st.tabs(["📈 Gráfico", "📅 Matriz de Retornos", "📋 Tabela Diária"])
         
-        # === ABA 1: GRÁFICO (Com legenda corrigida) ===
-@st.cache_data(ttl=86400)
-def get_cambio_historico():
-    try:
-        # Baixa dados (progress=False remove a barrinha de carregamento do terminal)
-        df = yf.download(["USDBRL=X", "EURBRL=X"], start="1994-07-01", progress=False)
-        
-        # Pega apenas o fechamento
-        df = df['Close']
-        
-        # --- CORREÇÃO DE DATA/FUSO ---
-        # Se o índice não tiver fuso (naive), assume UTC e converte para SP
-        if df.index.tz is None:
-            df.index = df.index.tz_localize('UTC')
-        
-        # Converte para América/Sao_Paulo
-        df.index = df.index.tz_convert('America/Sao_Paulo')
-        
-        # Remove a informação de fuso para não bugar o gráfico, mas mantém a data local correta
-        df.index = df.index.tz_localize(None)
-        
-        # Garante que não tenhamos datas futuras (filtro de segurança)
-        hoje = pd.Timestamp.now().normalize()
-        df = df[df.index <= hoje]
-        # -----------------------------
+        # === ABA 1: GRÁFICO (O código do gráfico volta aqui!) ===
+        with tab_graf:
+            cores_map = {"Dólar": "#00FF7F", "Euro": "#00BFFF"}
+            
+            fig_cambio = px.line(df_cambio, x=df_cambio.index, y=['Dólar', 'Euro'], 
+                                 labels={'value': 'Cotação (R$)', 'variable': 'Moeda', 'data': ''},
+                                 color_discrete_map=cores_map)
+            
+            fig_cambio.update_layout(
+                template="plotly_dark",
+                paper_bgcolor='rgba(0,0,0,0)',
+                plot_bgcolor='rgba(0,0,0,0)',
+                font=dict(color="#E0E0E0"),
+                hovermode="x unified",
+                # LEGENDA LIMPA E TRANSPARENTE
+                legend=dict(
+                    orientation="h",
+                    y=1.1, x=0.5,
+                    xanchor="center",
+                    bgcolor="rgba(0,0,0,0)", # Transparente
+                    bordercolor="rgba(0,0,0,0)"
+                ),
+                margin=dict(l=0, r=0, t=40, b=0)
+            )
+            
+            fig_cambio.update_xaxes(
+                showgrid=False, rangeslider_visible=False,
+                rangeselector=dict(
+                    buttons=list([
+                        dict(count=1, label="1A", step="year", stepmode="backward"),
+                        dict(count=5, label="5A", step="year", stepmode="backward"),
+                        dict(step="all", label="Tudo")
+                    ]),
+                    bgcolor="#262730", font=dict(color="white")
+                )
+            )
+            fig_cambio.update_yaxes(showgrid=True, gridcolor='#333333', tickprefix="R$ ")
+            
+            st.plotly_chart(fig_cambio, use_container_width=True)
 
-        df = df.rename(columns={'USDBRL=X': 'Dólar', 'EURBRL=X': 'Euro'})
-        df = df.ffill()
-        
-        return df
-    except Exception as e:
-        print(f"Erro Yahoo Finance Histórico: {e}")
-        return pd.DataFrame()
-
-        # === ABA 2: MATRIZ DE CALOR (Variação Mensal %) ===
+        # === ABA 2: MATRIZ DE CALOR ===
         with tab_matriz:
             st.caption("A matriz mostra a variação percentual (%) mês a mês. Verde = Valorização da moeda frente ao Real.")
             
-            # Seletor de moeda para a matriz
-            moeda_matriz = st.radio("Selecione a Moeda para a Matriz:", ["Dólar", "Euro"], horizontal=True)
+            moeda_matriz = st.radio("Selecione a Moeda:", ["Dólar", "Euro"], horizontal=True)
             
-            # Lógica: Transformar dados diários em Mensais (Último dia do mês)
-            df_mensal = df_cambio[[moeda_matriz]].resample('ME').last() # 'ME' é Month End (pandas novo) ou use 'M'
+            # Resample para Mês
+            df_mensal = df_cambio[[moeda_matriz]].resample('ME').last()
             
-            # Calcular retorno mensal
             df_retorno = df_mensal.pct_change() * 100
             df_retorno['ano'] = df_retorno.index.year
-            df_retorno['mes'] = df_retorno.index.month_name().str.slice(0, 3) # Jan, Feb...
+            df_retorno['mes'] = df_retorno.index.month_name().str.slice(0, 3)
             
-            # Traduzir meses (opcional, pois o pandas vem em inglês por padrão)
             mapa_meses_en_pt = {
                 'Jan': 'Jan', 'Feb': 'Fev', 'Mar': 'Mar', 'Apr': 'Abr', 'May': 'Mai', 'Jun': 'Jun',
                 'Jul': 'Jul', 'Aug': 'Ago', 'Sep': 'Set', 'Oct': 'Out', 'Nov': 'Nov', 'Dec': 'Dez'
             }
             df_retorno['mes'] = df_retorno['mes'].map(mapa_meses_en_pt)
             
-            # Pivotar para formato Matriz (Ano x Mês)
             try:
                 matrix_cambio = df_retorno.pivot(index='ano', columns='mes', values=moeda_matriz)
                 colunas_ordem = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez']
                 matrix_cambio = matrix_cambio[colunas_ordem].sort_index(ascending=False)
                 
-                # Exibir com cores (Vermelho cai, Verde sobe)
                 st.dataframe(
                     matrix_cambio.style.background_gradient(cmap='RdYlGn', vmin=-5, vmax=5).format("{:.2f}%"), 
                     use_container_width=True, 
                     height=500
                 )
             except Exception as e:
-                st.info(f"Dados insuficientes para gerar a matriz completa: {e}")
+                st.info(f"Dados insuficientes: {e}")
 
         # === ABA 3: TABELA DETALHADA ===
         with tab_tabela:
-            # Prepara tabela para download/visualização
             df_view = df_cambio.sort_index(ascending=False).copy()
             df_view.index.name = "Data"
             df_view = df_view.reset_index()
-            # Formata data para brasileiro
             df_view['Data'] = df_view['Data'].dt.strftime('%d/%m/%Y')
             
             st.dataframe(

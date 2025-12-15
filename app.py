@@ -5,8 +5,7 @@ import numpy as np
 import plotly.express as px
 from datetime import date
 import requests
-import urllib3
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+import yfinance as yf
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(
@@ -88,64 +87,56 @@ def get_focus_data():
 @st.cache_data(ttl=300)
 def get_currency_realtime():
     try:
-        url = "https://economia.awesomeapi.com.br/last/USD-BRL,EUR-BRL"
-        # Adicionamos headers para simular um navegador
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'
-        }
-        response = requests.get(url, headers=headers, timeout=5)
+        # Tickers do Yahoo: Dólar/Real e Euro/Real
+        tickers = ["USDBRL=X", "EURBRL=X"]
+        dados = {}
         
-        # Verifica se a requisição deu certo (código 200)
-        response.raise_for_status()
-        
-        data = response.json()
-        df = pd.DataFrame.from_dict(data, orient='index')
+        for t in tickers:
+            ticker_obj = yf.Ticker(t)
+            # fast_info é mais rápido e raramente falha
+            preco_atual = ticker_obj.fast_info['last_price']
+            fechamento_anterior = ticker_obj.fast_info['previous_close']
+            
+            # Calculamos a variação percentual manualmente
+            variacao = ((preco_atual - fechamento_anterior) / fechamento_anterior) * 100
+            
+            # Mapeia para o formato que seu painel já espera (USDBRL e EURBRL)
+            key = t.replace("=X", "") 
+            dados[key] = {
+                'bid': preco_atual,
+                'pctChange': variacao
+            }
+            
+        df = pd.DataFrame.from_dict(dados, orient='index')
         return df
     except Exception as e:
-        # Dica: Se quiser ver o erro real no terminal, descomente a linha abaixo:
-        # print(f"Erro na API de Moedas: {e}")
+        print(f"Erro Yahoo Finance Realtime: {e}")
         return pd.DataFrame()
 
 # 5. NOVO: Histórico de Câmbio (BCB - Séries Diárias)
-@st.cache_data(ttl=86400) # Cache de 24h
+@st.cache_data(ttl=86400)
 def get_cambio_historico():
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        }
+        # Baixa dados desde o início do plano real (1994)
+        # USDBRL=X é o ticker padrão. O Euro começou depois, mas o Yahoo gerencia os nulos.
+        df = yf.download(["USDBRL=X", "EURBRL=X"], start="1994-07-01", progress=False)
         
-        # URLs (SGS do BCB)
-        url_usd = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.1/dados?formato=json"
-        url_eur = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.21619/dados?formato=json"
+        # O yfinance retorna um MultiIndex nas colunas (Price, Ticker). 
+        # Vamos pegar apenas o 'Close' (Fechamento)
+        df = df['Close']
         
-        # IMPORTANTE: verify=False pula a checagem de SSL do governo que costuma falhar
-        resp_usd = requests.get(url_usd, headers=headers, timeout=15, verify=False)
-        resp_eur = requests.get(url_eur, headers=headers, timeout=15, verify=False)
+        # Renomeia para ficar bonito no gráfico
+        df = df.rename(columns={'USDBRL=X': 'Dólar', 'EURBRL=X': 'Euro'})
         
-        # Converte para DataFrame
-        df_usd = pd.DataFrame(resp_usd.json())
-        df_eur = pd.DataFrame(resp_eur.json())
+        # Remove timezone se houver (para evitar erros de plotagem)
+        df.index = df.index.tz_localize(None)
         
-        # Tratamento USD
-        df_usd['data'] = pd.to_datetime(df_usd['data'], format='%d/%m/%Y')
-        df_usd = df_usd.rename(columns={'valor': 'Dólar'})
-        df_usd = df_usd.set_index('data')
+        # Preenche dias sem negociação (fins de semana) com o valor anterior
+        df = df.ffill()
         
-        # Tratamento EUR
-        df_eur['data'] = pd.to_datetime(df_eur['data'], format='%d/%m/%Y')
-        df_eur = df_eur.rename(columns={'valor': 'Euro'})
-        df_eur = df_eur.set_index('data')
-        
-        # Juntar tudo e filtrar a partir do Plano Real
-        df_final = df_usd.join(df_eur, how='outer')
-        df_final = df_final[df_final.index >= '1994-07-01']
-        
-        # Preencher buracos (ffill) para fins de semana
-        df_final = df_final.ffill()
-        
-        return df_final
+        return df
     except Exception as e:
-        print(f"Erro ao baixar histórico de câmbio: {e}") # Isso vai aparecer no seu terminal/log
+        print(f"Erro Yahoo Finance Histórico: {e}")
         return pd.DataFrame()
 
 # 6. Processamento Comum

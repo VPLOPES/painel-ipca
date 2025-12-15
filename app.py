@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 from datetime import date
+import requests
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(
@@ -12,7 +13,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# Estilo CSS para dar um visual "Dashboard"
+# Estilo CSS
 st.markdown("""
 <style>
     .metric-card {
@@ -20,16 +21,14 @@ st.markdown("""
         border: 1px solid #e0e0e0;
         padding: 15px;
         border-radius: 8px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
     }
-    .main-header {
-        background-color: #f8f9fa;
-        padding: 20px;
-        border-radius: 10px;
-        margin-bottom: 20px;
-        border-left: 5px solid #003366;
+    /* Estilo para o Expander ficar mais destacado */
+    .streamlit-expanderHeader {
+        background-color: #f0f2f6;
+        border-radius: 5px;
+        font-weight: bold;
+        color: #003366;
     }
-    h3 { color: #003366; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -69,15 +68,17 @@ def get_bcb_data(codigo_serie):
     except Exception as e:
         return pd.DataFrame()
 
-# 3. Boletim Focus (Corrigido)
-@st.cache_data(ttl=3600) # Cache de 1 hora
+# 3. Boletim Focus (Robusto)
+@st.cache_data(ttl=3600)
 def get_focus_data():
     try:
-        # CORREÇÃO AQUI: Trocamos espaço por %20
+        # URL corrigida e com user-agent para evitar bloqueio
         url = "https://olinda.bcb.gov.br/olinda/servico/Expectativas/versao/v1/odata/ExpectativasMercadoAnuais?$top=1000&$orderby=Data%20desc&$format=json"
         
-        data_json = pd.read_json(url)
-        df = pd.DataFrame(data_json['value'].tolist())
+        response = requests.get(url)
+        data_json = response.json()
+        
+        df = pd.DataFrame(data_json['value'])
         
         indicadores = ['IPCA', 'PIB Total', 'Selic', 'Câmbio']
         df = df[df['Indicador'].isin(indicadores)]
@@ -85,16 +86,14 @@ def get_focus_data():
         df['data_relatorio'] = pd.to_datetime(df['data_relatorio'])
         return df
     except Exception as e:
-        st.error(f"Erro Focus: {e}")
-        return pd.DataFrame()
+        return pd.DataFrame() # Retorna vazio se der erro
 
-# 4. Cotação de Moedas (Novo)
-@st.cache_data(ttl=300) # Cache de 5 minutos
+# 4. Cotação de Moedas
+@st.cache_data(ttl=300)
 def get_currency_data():
     try:
-        # API AwesomeAPI (Gratuita e Rápida)
         url = "https://economia.awesomeapi.com.br/last/USD-BRL,EUR-BRL"
-        df = pd.read_json(url).T # Transpor para ficar em linhas
+        df = pd.read_json(url).T
         return df
     except:
         return pd.DataFrame()
@@ -137,11 +136,9 @@ def calcular_correcao(df, valor, data_ini_code, data_fim_code):
     }, None
 
 # ==============================================================================
-# LAYOUT DO APLICATIVO
+# LAYOUT - SIDEBAR
 # ==============================================================================
-
-# SIDEBAR
-st.sidebar.image("Logo_VPL_Consultoria_Financeira.png", use_container_width=True)
+st.sidebar.image("VPL_Consultoria_Financeira.jpeg", use_container_width=True)
 st.sidebar.header("Configurações")
 
 tipo_indice = st.sidebar.selectbox(
@@ -167,10 +164,10 @@ with st.spinner(f"Carregando dados..."):
         cor_tema = "#333333"
 
 if df.empty:
-    st.error("Erro ao carregar dados do índice selecionado.")
+    st.error("Erro ao carregar dados.")
     st.stop()
 
-# --- CALCULADORA (SIDEBAR) ---
+# --- CALCULADORA ---
 st.sidebar.divider()
 st.sidebar.subheader("Calculadora")
 valor_input = st.sidebar.number_input("Valor (R$)", value=1000.00, step=100.00, format="%.2f")
@@ -207,67 +204,63 @@ if st.sidebar.button("Calcular", type="primary"):
         st.sidebar.markdown(f"Total Período: **{res['percentual']:.2f}%**")
 
 # ==============================================================================
-# ÁREA SUPERIOR: DASHBOARD DE MERCADO (Onde você marcou em vermelho)
+# ÁREA SUPERIOR: EXPANDER DE MERCADO (CLICÁVEL)
 # ==============================================================================
 
-st.markdown("<div class='main-header'><h3>🔭 Visão de Mercado (Focus & Moedas)</h3></div>", unsafe_allow_html=True)
-
-# Buscar dados do Topo
-df_focus = get_focus_data()
-df_moedas = get_currency_data()
-ano_atual = date.today().year
-
-col_top1, col_top2 = st.columns([2, 1])
-
-# COLUNA 1: BOLETIM FOCUS (2025 - Ano Atual)
-with col_top1:
-    if not df_focus.empty:
-        ultima_data = df_focus['data_relatorio'].max()
-        df_last = df_focus[df_focus['data_relatorio'] == ultima_data]
-        df_view = df_last[df_last['ano_referencia'] == ano_atual]
-        df_pivot = df_view.pivot_table(index='Indicador', columns='ano_referencia', values='previsao', aggfunc='mean')
-        
-        st.markdown(f"**Expectativa {ano_atual} (Boletim Focus - {pd.to_datetime(ultima_data).strftime('%d/%m')})**")
-        
-        fc1, fc2, fc3, fc4 = st.columns(4)
-        ipca_f = df_pivot.get(ano_atual, {}).get('IPCA', 0)
-        selic_f = df_pivot.get(ano_atual, {}).get('Selic', 0)
-        pib_f = df_pivot.get(ano_atual, {}).get('PIB Total', 0)
-        cambio_f = df_pivot.get(ano_atual, {}).get('Câmbio', 0)
-        
-        fc1.metric("IPCA (Fim)", f"{ipca_f:.2f}%")
-        fc2.metric("Selic (Fim)", f"{selic_f:.2f}%")
-        fc3.metric("PIB", f"{pib_f:.2f}%")
-        fc4.metric("Dólar (Alvo)", f"R$ {cambio_f:.2f}")
-    else:
-        st.warning("Focus indisponível.")
-
-# COLUNA 2: COTAÇÃO MOEDAS (TEMPO REAL)
-with col_top2:
-    st.markdown("**Câmbio (Tempo Real)**")
-    mc1, mc2 = st.columns(2)
+# O "expanded=False" garante que ele comece fechado
+with st.expander("🔭 Clique para ver: Expectativas de Mercado (Focus) & Câmbio", expanded=False):
     
-    if not df_moedas.empty:
-        try:
-            usd_val = float(df_moedas.loc['USDBRL', 'bid'])
-            eur_val = float(df_moedas.loc['EURBRL', 'bid'])
-            usd_var = float(df_moedas.loc['USDBRL', 'pctChange'])
-            eur_var = float(df_moedas.loc['EURBRL', 'pctChange'])
+    col_top1, col_top2 = st.columns([2, 1])
+    
+    # --- DADOS FOCUS ---
+    df_focus = get_focus_data()
+    ano_atual = date.today().year
+    
+    with col_top1:
+        if not df_focus.empty:
+            ultima_data = df_focus['data_relatorio'].max()
+            df_last = df_focus[df_focus['data_relatorio'] == ultima_data]
+            df_view = df_last[df_last['ano_referencia'] == ano_atual]
+            df_pivot = df_view.pivot_table(index='Indicador', columns='ano_referencia', values='previsao', aggfunc='mean')
             
-            mc1.metric("Dólar", f"R$ {usd_val:.2f}", f"{usd_var}%")
-            mc2.metric("Euro", f"R$ {eur_val:.2f}", f"{eur_var}%")
-        except:
-             st.info("Carregando moedas...")
-    else:
-        st.info("API Moedas indisponível.")
+            # Formatação da data para título
+            data_str = pd.to_datetime(ultima_data).strftime('%d/%m/%Y')
+            st.markdown(f"**Boletim Focus ({data_str}) - Previsão Fim de {ano_atual}**")
+            
+            fc1, fc2, fc3, fc4 = st.columns(4)
+            ipca_f = df_pivot.get(ano_atual, {}).get('IPCA', 0)
+            selic_f = df_pivot.get(ano_atual, {}).get('Selic', 0)
+            pib_f = df_pivot.get(ano_atual, {}).get('PIB Total', 0)
+            cambio_f = df_pivot.get(ano_atual, {}).get('Câmbio', 0)
+            
+            fc1.metric("IPCA", f"{ipca_f:.2f}%")
+            fc2.metric("Selic", f"{selic_f:.2f}%")
+            fc3.metric("PIB", f"{pib_f:.2f}%")
+            fc4.metric("Dólar", f"R$ {cambio_f:.2f}")
+        else:
+            st.warning("Dados do Focus indisponíveis no momento.")
 
-st.divider()
+    # --- DADOS MOEDAS ---
+    df_moedas = get_currency_data()
+    with col_top2:
+        st.markdown("**Câmbio (Tempo Real)**")
+        mc1, mc2 = st.columns(2)
+        if not df_moedas.empty:
+            try:
+                usd = df_moedas.loc['USDBRL']
+                eur = df_moedas.loc['EURBRL']
+                mc1.metric("Dólar", f"R$ {float(usd['bid']):.2f}", f"{float(usd['pctChange']):.2f}%")
+                mc2.metric("Euro", f"R$ {float(eur['bid']):.2f}", f"{float(eur['pctChange']):.2f}%")
+            except:
+                st.info("Erro visualização moedas")
+        else:
+            st.info("API indisponível")
 
 # ==============================================================================
-# ÁREA INFERIOR: DETALHES DO ÍNDICE SELECIONADO (IPCA, INPC, ETC)
+# ÁREA PRINCIPAL: DETALHES DO ÍNDICE
 # ==============================================================================
 
-st.title(f"📊 Detalhes: {tipo_indice.split()[0]}")
+st.title(f"📊 Painel: {tipo_indice.split()[0]}")
 st.markdown(f"**Dados históricos atualizados até:** {df.iloc[0]['data_fmt']}")
 
 kpi1, kpi2, kpi3, kpi4 = st.columns(4)
@@ -282,7 +275,6 @@ with tab1:
     df_chart = df.dropna(subset=['acum_12m']).sort_values('data_date')
     indices_volateis = ["IGP-M", "SELIC", "CDI"]
     eh_volatil = any(idx in tipo_indice for idx in indices_volateis)
-    
     if eh_volatil:
         df_chart = df_chart[df_chart['ano'].astype(int) >= 2000]
     

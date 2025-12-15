@@ -300,26 +300,56 @@ with st.expander("💸 Histórico de Câmbio (Dólar e Euro desde 1994)", expand
     df_cambio = get_cambio_historico()
     
     if not df_cambio.empty:
-        # Gráfico interativo
-        fig_cambio = px.line(df_cambio, x=df_cambio.index, y=['Dólar', 'Euro'], 
-                             labels={'value': 'Preço (R$)', 'variable': 'Moeda', 'data': 'Data'})
+        # Definindo cores de alto contraste para fundo escuro
+        # Dólar: Verde Neon | Euro: Azul Celeste
+        cores_map = {"Dólar": "#00FF7F", "Euro": "#00BFFF"}
         
-        # Personalização do gráfico
-        fig_cambio.update_layout(hovermode="x unified", legend=dict(orientation="h", y=1.02, x=0))
+        fig_cambio = px.line(df_cambio, x=df_cambio.index, y=['Dólar', 'Euro'], 
+                             labels={'value': 'Cotação', 'variable': 'Moeda', 'data': ''},
+                             color_discrete_map=cores_map) # Aplica as cores manuais
+        
+        # PERSONALIZAÇÃO VISUAL (O Pulo do Gato)
+        fig_cambio.update_layout(
+            template="plotly_dark",   # Tema escuro nativo
+            paper_bgcolor='rgba(0,0,0,0)', # Fundo transparente para integrar ao app
+            plot_bgcolor='rgba(0,0,0,0)',  # Área de plotagem transparente
+            font=dict(color="#E0E0E0"),    # Texto claro
+            hovermode="x unified",         # Tooltip mostra as duas moedas juntas
+            legend=dict(
+                orientation="h",  # Legenda na horizontal
+                y=1.1, x=0,       # Posicionada acima do gráfico
+                title=None,
+                bgcolor='rgba(0,0,0,0)'
+            ),
+            margin=dict(l=0, r=0, t=30, b=0) # Margens otimizadas
+        )
+        
+        # EIXO X (Datas)
         fig_cambio.update_xaxes(
-            rangeslider_visible=True, # Slider de zoom na parte inferior
+            showgrid=False,
+            rangeslider_visible=False, # Remove aquela barra de rolagem inferior feia
             rangeselector=dict(
                 buttons=list([
                     dict(count=1, label="1 Ano", step="year", stepmode="backward"),
                     dict(count=5, label="5 Anos", step="year", stepmode="backward"),
                     dict(count=10, label="10 Anos", step="year", stepmode="backward"),
-                    dict(step="all", label="Tudo")
-                ])
+                    dict(step="all", label="Desde 1994")
+                ]),
+                bgcolor="#262730", # Cor dos botões combinando com o Streamlit
+                font=dict(color="white")
             )
         )
+        
+        # EIXO Y (Valores)
+        fig_cambio.update_yaxes(
+            showgrid=True, 
+            gridcolor='#333333', # Grade bem sutil
+            tickprefix="R$ "     # Formata o eixo com R$
+        )
+        
         st.plotly_chart(fig_cambio, use_container_width=True)
     else:
-        st.warning("Não foi possível carregar o histórico do Banco Central.")
+        st.warning("Não foi possível carregar o histórico.")
 
 # ==============================================================================
 # ÁREA PRINCIPAL: DETALHES DO ÍNDICE

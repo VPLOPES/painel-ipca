@@ -296,60 +296,133 @@ with st.expander("🔭 Clique para ver: Expectativas de Mercado (Focus) & Câmbi
 with st.expander("💸 Histórico de Câmbio (Dólar e Euro desde 1994)", expanded=False):
     st.markdown("Evolução das moedas frente ao Real (R$) desde o início do Plano Real.")
     
-    # Carrega dados
+    # Carrega dados diários
     df_cambio = get_cambio_historico()
     
     if not df_cambio.empty:
-        # Definindo cores de alto contraste para fundo escuro
-        # Dólar: Verde Neon | Euro: Azul Celeste
-        cores_map = {"Dólar": "#00FF7F", "Euro": "#00BFFF"}
+        # --- 1. RESUMO DO TOPO (Último Fechamento) ---
+        # Pega o último registro válido
+        ultimo_dado = df_cambio.iloc[-1]
+        penultimo_dado = df_cambio.iloc[-2]
+        data_atual = df_cambio.index[-1].strftime('%d/%m/%Y')
         
-        fig_cambio = px.line(df_cambio, x=df_cambio.index, y=['Dólar', 'Euro'], 
-                             labels={'value': 'Cotação', 'variable': 'Moeda', 'data': ''},
-                             color_discrete_map=cores_map) # Aplica as cores manuais
+        st.markdown(f"**Fechamento: {data_atual}**")
+        col_res1, col_res2, col_res3 = st.columns([1,1,2])
         
-        # PERSONALIZAÇÃO VISUAL (O Pulo do Gato)
-        fig_cambio.update_layout(
-            template="plotly_dark",   # Tema escuro nativo
-            paper_bgcolor='rgba(0,0,0,0)', # Fundo transparente para integrar ao app
-            plot_bgcolor='rgba(0,0,0,0)',  # Área de plotagem transparente
-            font=dict(color="#E0E0E0"),    # Texto claro
-            hovermode="x unified",         # Tooltip mostra as duas moedas juntas
-            legend=dict(
-                orientation="h",  # Legenda na horizontal
-                y=1.1, x=0,       # Posicionada acima do gráfico
-                title=None,
-                bgcolor='rgba(0,0,0,0)'
-            ),
-            margin=dict(l=0, r=0, t=30, b=0) # Margens otimizadas
-        )
+        # Cálculo das variações diárias
+        usd_val = ultimo_dado['Dólar']
+        usd_var = ((usd_val - penultimo_dado['Dólar']) / penultimo_dado['Dólar']) * 100
         
-        # EIXO X (Datas)
-        fig_cambio.update_xaxes(
-            showgrid=False,
-            rangeslider_visible=False, # Remove aquela barra de rolagem inferior feia
-            rangeselector=dict(
-                buttons=list([
-                    dict(count=1, label="1 Ano", step="year", stepmode="backward"),
-                    dict(count=5, label="5 Anos", step="year", stepmode="backward"),
-                    dict(count=10, label="10 Anos", step="year", stepmode="backward"),
-                    dict(step="all", label="Desde 1994")
-                ]),
-                bgcolor="#262730", # Cor dos botões combinando com o Streamlit
-                font=dict(color="white")
+        eur_val = ultimo_dado['Euro']
+        eur_var = ((eur_val - penultimo_dado['Euro']) / penultimo_dado['Euro']) * 100
+        
+        col_res1.metric("Dólar", f"R$ {usd_val:.2f}", f"{usd_var:.2f}%")
+        col_res2.metric("Euro", f"R$ {eur_val:.2f}", f"{eur_var:.2f}%")
+        
+        st.divider()
+
+        # --- 2. CRIAÇÃO DAS ABAS ---
+        tab_graf, tab_matriz, tab_tabela = st.tabs(["📈 Gráfico", "📅 Matriz de Retornos", "📋 Tabela Diária"])
+        
+        # === ABA 1: GRÁFICO (Com legenda corrigida) ===
+        with tab_graf:
+            cores_map = {"Dólar": "#00FF7F", "Euro": "#00BFFF"}
+            
+            fig_cambio = px.line(df_cambio, x=df_cambio.index, y=['Dólar', 'Euro'], 
+                                 labels={'value': 'Cotação (R$)', 'variable': 'Moeda', 'data': ''},
+                                 color_discrete_map=cores_map)
+            
+            fig_cambio.update_layout(
+                template="plotly_dark",
+                paper_bgcolor='rgba(0,0,0,0)',
+                plot_bgcolor='rgba(0,0,0,0)',
+                font=dict(color="#E0E0E0"),
+                hovermode="x unified",
+                # CORREÇÃO DA LEGENDA: Centralizada e com fundo para leitura
+                legend=dict(
+                    orientation="h",
+                    y=1.1, x=0.5,
+                    xanchor="center",
+                    bgcolor="rgba(0,0,0,0.5)",
+                    bordercolor="#444",
+                    borderwidth=1
+                ),
+                margin=dict(l=0, r=0, t=40, b=0)
             )
-        )
-        
-        # EIXO Y (Valores)
-        fig_cambio.update_yaxes(
-            showgrid=True, 
-            gridcolor='#333333', # Grade bem sutil
-            tickprefix="R$ "     # Formata o eixo com R$
-        )
-        
-        st.plotly_chart(fig_cambio, use_container_width=True)
+            
+            fig_cambio.update_xaxes(
+                showgrid=False, rangeslider_visible=False,
+                rangeselector=dict(
+                    buttons=list([
+                        dict(count=1, label="1A", step="year", stepmode="backward"),
+                        dict(count=5, label="5A", step="year", stepmode="backward"),
+                        dict(step="all", label="Tudo")
+                    ]),
+                    bgcolor="#262730", font=dict(color="white")
+                )
+            )
+            fig_cambio.update_yaxes(showgrid=True, gridcolor='#333333', tickprefix="R$ ")
+            
+            st.plotly_chart(fig_cambio, use_container_width=True)
+
+        # === ABA 2: MATRIZ DE CALOR (Variação Mensal %) ===
+        with tab_matriz:
+            st.caption("A matriz mostra a variação percentual (%) mês a mês. Verde = Valorização da moeda frente ao Real.")
+            
+            # Seletor de moeda para a matriz
+            moeda_matriz = st.radio("Selecione a Moeda para a Matriz:", ["Dólar", "Euro"], horizontal=True)
+            
+            # Lógica: Transformar dados diários em Mensais (Último dia do mês)
+            df_mensal = df_cambio[[moeda_matriz]].resample('ME').last() # 'ME' é Month End (pandas novo) ou use 'M'
+            
+            # Calcular retorno mensal
+            df_retorno = df_mensal.pct_change() * 100
+            df_retorno['ano'] = df_retorno.index.year
+            df_retorno['mes'] = df_retorno.index.month_name().str.slice(0, 3) # Jan, Feb...
+            
+            # Traduzir meses (opcional, pois o pandas vem em inglês por padrão)
+            mapa_meses_en_pt = {
+                'Jan': 'Jan', 'Feb': 'Fev', 'Mar': 'Mar', 'Apr': 'Abr', 'May': 'Mai', 'Jun': 'Jun',
+                'Jul': 'Jul', 'Aug': 'Ago', 'Sep': 'Set', 'Oct': 'Out', 'Nov': 'Nov', 'Dec': 'Dez'
+            }
+            df_retorno['mes'] = df_retorno['mes'].map(mapa_meses_en_pt)
+            
+            # Pivotar para formato Matriz (Ano x Mês)
+            try:
+                matrix_cambio = df_retorno.pivot(index='ano', columns='mes', values=moeda_matriz)
+                colunas_ordem = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez']
+                matrix_cambio = matrix_cambio[colunas_ordem].sort_index(ascending=False)
+                
+                # Exibir com cores (Vermelho cai, Verde sobe)
+                st.dataframe(
+                    matrix_cambio.style.background_gradient(cmap='RdYlGn', vmin=-5, vmax=5).format("{:.2f}%"), 
+                    use_container_width=True, 
+                    height=500
+                )
+            except Exception as e:
+                st.info(f"Dados insuficientes para gerar a matriz completa: {e}")
+
+        # === ABA 3: TABELA DETALHADA ===
+        with tab_tabela:
+            # Prepara tabela para download/visualização
+            df_view = df_cambio.sort_index(ascending=False).copy()
+            df_view.index.name = "Data"
+            df_view = df_view.reset_index()
+            # Formata data para brasileiro
+            df_view['Data'] = df_view['Data'].dt.strftime('%d/%m/%Y')
+            
+            st.dataframe(
+                df_view, 
+                use_container_width=True, 
+                hide_index=True,
+                column_config={
+                    "Dólar": st.column_config.NumberColumn(format="R$ %.4f"),
+                    "Euro": st.column_config.NumberColumn(format="R$ %.4f")
+                }
+            )
+
     else:
-        st.warning("Não foi possível carregar o histórico.")
+        st.warning("Não foi possível carregar o histórico do Yahoo Finance.")
 
 # ==============================================================================
 # ÁREA PRINCIPAL: DETALHES DO ÍNDICE

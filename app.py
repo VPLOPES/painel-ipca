@@ -83,68 +83,45 @@ def get_focus_data():
     except:
         return pd.DataFrame()
 
-# 4. Cotação de Moedas (Tempo Real)
+# 4. Cotação de Moedas (Tempo Real - Via Yahoo Finance)
 @st.cache_data(ttl=300)
 def get_currency_realtime():
     try:
-        # Tickers do Yahoo: Dólar/Real e Euro/Real
         tickers = ["USDBRL=X", "EURBRL=X"]
         dados = {}
-        
         for t in tickers:
             ticker_obj = yf.Ticker(t)
-            # fast_info é mais rápido e raramente falha
             preco_atual = ticker_obj.fast_info['last_price']
             fechamento_anterior = ticker_obj.fast_info['previous_close']
-            
-            # Calculamos a variação percentual manualmente
             variacao = ((preco_atual - fechamento_anterior) / fechamento_anterior) * 100
-            
-            # Mapeia para o formato que seu painel já espera (USDBRL e EURBRL)
             key = t.replace("=X", "") 
-            dados[key] = {
-                'bid': preco_atual,
-                'pctChange': variacao
-            }
-            
+            dados[key] = {'bid': preco_atual, 'pctChange': variacao}
         df = pd.DataFrame.from_dict(dados, orient='index')
         return df
     except Exception as e:
-        print(f"Erro Yahoo Finance Realtime: {e}")
         return pd.DataFrame()
 
-# 5. NOVO: Histórico de Câmbio (BCB - Séries Diárias)
+# 5. Histórico de Câmbio (Via Yahoo Finance - Com Correção de Fuso)
 @st.cache_data(ttl=86400)
 def get_cambio_historico():
     try:
-        # Baixa dados (progress=False remove a barrinha de carregamento do terminal)
         df = yf.download(["USDBRL=X", "EURBRL=X"], start="1994-07-01", progress=False)
-        
-        # Pega apenas o fechamento
         df = df['Close']
         
         # --- CORREÇÃO DE DATA/FUSO ---
-        # Se o índice não tiver fuso (naive), assume UTC e converte para SP
         if df.index.tz is None:
             df.index = df.index.tz_localize('UTC')
-        
-        # Converte para América/Sao_Paulo
         df.index = df.index.tz_convert('America/Sao_Paulo')
-        
-        # Remove a informação de fuso para não bugar o gráfico, mas mantém a data local correta
         df.index = df.index.tz_localize(None)
         
-        # Garante que não tenhamos datas futuras (filtro de segurança)
         hoje = pd.Timestamp.now().normalize()
         df = df[df.index <= hoje]
         # -----------------------------
 
         df = df.rename(columns={'USDBRL=X': 'Dólar', 'EURBRL=X': 'Euro'})
         df = df.ffill()
-        
         return df
     except Exception as e:
-        print(f"Erro Yahoo Finance Histórico: {e}")
         return pd.DataFrame()
 
 # 6. Processamento Comum
@@ -184,7 +161,12 @@ def calcular_correcao(df, valor, data_ini_code, data_fim_code):
 # ==============================================================================
 # LAYOUT - SIDEBAR
 # ==============================================================================
-st.sidebar.image("Logo_VPL_Consultoria_Financeira.png", use_container_width=True)
+# Tenta carregar logo, se não existir, segue sem
+try:
+    st.sidebar.image("Logo_VPL_Consultoria_Financeira.png", use_container_width=True)
+except:
+    st.sidebar.write("VPL CONSULTORIA")
+
 st.sidebar.header("Configurações")
 
 tipo_indice = st.sidebar.selectbox(
@@ -195,19 +177,19 @@ tipo_indice = st.sidebar.selectbox(
 with st.spinner(f"Carregando dados..."):
     if "IPCA" in tipo_indice:
         df = get_sidra_data("1737", "63")
-        cor_tema = "#003366"
+        cor_tema = "#00BFFF" # Azul Neon (Ajustado para Dark)
     elif "INPC" in tipo_indice:
         df = get_sidra_data("1736", "44")
-        cor_tema = "#2E8B57"
+        cor_tema = "#00FF7F" # Verde Neon
     elif "IGP-M" in tipo_indice:
         df = get_bcb_data("189")
-        cor_tema = "#8B0000"
+        cor_tema = "#FF6347" # Vermelho Tomate (Mais visível no escuro)
     elif "SELIC" in tipo_indice:
         df = get_bcb_data("4390")
-        cor_tema = "#DAA520"
+        cor_tema = "#FFD700" # Dourado
     elif "CDI" in tipo_indice:
         df = get_bcb_data("4391")
-        cor_tema = "#333333"
+        cor_tema = "#FFFFFF" # Branco
 
 if df.empty:
     st.error("Erro ao carregar dados.")
@@ -248,6 +230,8 @@ if st.sidebar.button("Calcular", type="primary"):
         st.sidebar.markdown(f"<small>{texto_op}</small>", unsafe_allow_html=True)
         st.sidebar.markdown(f"<h2 style='color: {cor_tema}; margin:0;'>R$ {res['valor_final']:,.2f}</h2>", unsafe_allow_html=True)
         st.sidebar.markdown(f"Total Período: **{res['percentual']:.2f}%**")
+        # MELHORIA: EXIBIR FATOR
+        st.sidebar.markdown(f"Fator de Correção: **{res['fator']:.6f}**")
 
 # ==============================================================================
 # ÁREA SUPERIOR: EXPANDERS
@@ -300,7 +284,7 @@ with st.expander("🔭 Clique para ver: Expectativas de Mercado (Focus) & Câmbi
         else:
             st.info("API indisponível")
 
-# 2. HISTÓRICO DE CÂMBIO (NOVO!)
+# 2. HISTÓRICO DE CÂMBIO (COMPLETO)
 with st.expander("💸 Histórico de Câmbio (Dólar e Euro desde 1994)", expanded=False):
     st.markdown("Evolução das moedas frente ao Real (R$) desde o início do Plano Real.")
     
@@ -308,8 +292,7 @@ with st.expander("💸 Histórico de Câmbio (Dólar e Euro desde 1994)", expand
     df_cambio = get_cambio_historico()
     
     if not df_cambio.empty:
-        # --- 1. RESUMO DO TOPO (Último Fechamento) ---
-        # Pega o último registro válido
+        # --- 1. RESUMO DO TOPO ---
         ultimo_dado = df_cambio.iloc[-1]
         penultimo_dado = df_cambio.iloc[-2]
         data_atual = df_cambio.index[-1].strftime('%d/%m/%Y')
@@ -317,7 +300,6 @@ with st.expander("💸 Histórico de Câmbio (Dólar e Euro desde 1994)", expand
         st.markdown(f"**Fechamento: {data_atual}**")
         col_res1, col_res2, col_res3 = st.columns([1,1,2])
         
-        # Cálculo das variações diárias
         usd_val = ultimo_dado['Dólar']
         usd_var = ((usd_val - penultimo_dado['Dólar']) / penultimo_dado['Dólar']) * 100
         
@@ -329,97 +311,63 @@ with st.expander("💸 Histórico de Câmbio (Dólar e Euro desde 1994)", expand
         
         st.divider()
 
-        # --- 2. CRIAÇÃO DAS ABAS ---
+        # --- 2. ABAS ---
         tab_graf, tab_matriz, tab_tabela = st.tabs(["📈 Gráfico", "📅 Matriz de Retornos", "📋 Tabela Diária"])
         
-        # === ABA 1: GRÁFICO (O código do gráfico volta aqui!) ===
+        # ABA GRÁFICO
         with tab_graf:
             cores_map = {"Dólar": "#00FF7F", "Euro": "#00BFFF"}
-            
             fig_cambio = px.line(df_cambio, x=df_cambio.index, y=['Dólar', 'Euro'], 
                                  labels={'value': 'Cotação (R$)', 'variable': 'Moeda', 'data': ''},
                                  color_discrete_map=cores_map)
-            
             fig_cambio.update_layout(
                 template="plotly_dark",
                 paper_bgcolor='rgba(0,0,0,0)',
                 plot_bgcolor='rgba(0,0,0,0)',
                 font=dict(color="#E0E0E0"),
                 hovermode="x unified",
-                # LEGENDA LIMPA E TRANSPARENTE
-                legend=dict(
-                    orientation="h",
-                    y=1.1, x=0.5,
-                    xanchor="center",
-                    bgcolor="rgba(0,0,0,0)", # Transparente
-                    bordercolor="rgba(0,0,0,0)"
-                ),
+                legend=dict(orientation="h", y=1.1, x=0.5, xanchor="center", bgcolor="rgba(0,0,0,0)"),
                 margin=dict(l=0, r=0, t=40, b=0)
             )
-            
-            fig_cambio.update_xaxes(
-                showgrid=False, rangeslider_visible=False,
-                rangeselector=dict(
-                    buttons=list([
-                        dict(count=1, label="1A", step="year", stepmode="backward"),
-                        dict(count=5, label="5A", step="year", stepmode="backward"),
-                        dict(step="all", label="Tudo")
-                    ]),
-                    bgcolor="#262730", font=dict(color="white")
-                )
-            )
+            fig_cambio.update_xaxes(showgrid=False, rangeslider_visible=False)
             fig_cambio.update_yaxes(showgrid=True, gridcolor='#333333', tickprefix="R$ ")
-            
             st.plotly_chart(fig_cambio, use_container_width=True)
 
-        # === ABA 2: MATRIZ DE CALOR ===
+        # ABA MATRIZ
         with tab_matriz:
-            st.caption("A matriz mostra a variação percentual (%) mês a mês. Verde = Valorização da moeda frente ao Real.")
-            
+            st.caption("A matriz mostra a variação percentual (%) mês a mês.")
             moeda_matriz = st.radio("Selecione a Moeda:", ["Dólar", "Euro"], horizontal=True)
             
-            # Resample para Mês
             df_mensal = df_cambio[[moeda_matriz]].resample('ME').last()
-            
             df_retorno = df_mensal.pct_change() * 100
             df_retorno['ano'] = df_retorno.index.year
             df_retorno['mes'] = df_retorno.index.month_name().str.slice(0, 3)
             
-            mapa_meses_en_pt = {
-                'Jan': 'Jan', 'Feb': 'Fev', 'Mar': 'Mar', 'Apr': 'Abr', 'May': 'Mai', 'Jun': 'Jun',
-                'Jul': 'Jul', 'Aug': 'Ago', 'Sep': 'Set', 'Oct': 'Out', 'Nov': 'Nov', 'Dec': 'Dez'
-            }
+            mapa_meses_en_pt = {'Jan': 'Jan', 'Feb': 'Fev', 'Mar': 'Mar', 'Apr': 'Abr', 'May': 'Mai', 'Jun': 'Jun',
+                                'Jul': 'Jul', 'Aug': 'Ago', 'Sep': 'Set', 'Oct': 'Out', 'Nov': 'Nov', 'Dec': 'Dez'}
             df_retorno['mes'] = df_retorno['mes'].map(mapa_meses_en_pt)
             
             try:
                 matrix_cambio = df_retorno.pivot(index='ano', columns='mes', values=moeda_matriz)
                 colunas_ordem = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez']
                 matrix_cambio = matrix_cambio[colunas_ordem].sort_index(ascending=False)
-                
-                st.dataframe(
-                    matrix_cambio.style.background_gradient(cmap='RdYlGn', vmin=-5, vmax=5).format("{:.2f}%"), 
-                    use_container_width=True, 
-                    height=500
-                )
+                st.dataframe(matrix_cambio.style.background_gradient(cmap='RdYlGn', vmin=-5, vmax=5).format("{:.2f}%"), use_container_width=True, height=500)
             except Exception as e:
                 st.info(f"Dados insuficientes: {e}")
 
-        # === ABA 3: TABELA DETALHADA ===
+        # ABA TABELA (COM DOWNLOAD)
         with tab_tabela:
             df_view = df_cambio.sort_index(ascending=False).copy()
             df_view.index.name = "Data"
             df_view = df_view.reset_index()
             df_view['Data'] = df_view['Data'].dt.strftime('%d/%m/%Y')
             
-            st.dataframe(
-                df_view, 
-                use_container_width=True, 
-                hide_index=True,
-                column_config={
-                    "Dólar": st.column_config.NumberColumn(format="R$ %.4f"),
-                    "Euro": st.column_config.NumberColumn(format="R$ %.4f")
-                }
-            )
+            # Botão Download
+            csv_cambio = df_view.to_csv(index=False).encode('utf-8')
+            st.download_button("📥 Baixar dados em CSV", csv_cambio, "cambio_historico.csv", "text/csv")
+            
+            st.dataframe(df_view, use_container_width=True, hide_index=True,
+                         column_config={"Dólar": st.column_config.NumberColumn(format="R$ %.4f"), "Euro": st.column_config.NumberColumn(format="R$ %.4f")})
 
     else:
         st.warning("Não foi possível carregar o histórico do Yahoo Finance.")
@@ -439,6 +387,7 @@ kpi4.metric("Início da Série", df['ano'].min())
 
 tab1, tab2, tab3 = st.tabs(["📈 Gráfico", "📅 Matriz de Calor", "📋 Tabela Detalhada"])
 
+# GRÁFICO PRINCIPAL (ESTILIZADO)
 with tab1:
     df_chart = df.dropna(subset=['acum_12m']).sort_values('data_date')
     indices_volateis = ["IGP-M", "SELIC", "CDI"]
@@ -446,10 +395,24 @@ with tab1:
     if eh_volatil:
         df_chart = df_chart[df_chart['ano'].astype(int) >= 2000]
     
-    fig = px.line(df_chart, x='data_date', y='acum_12m', title=f"Histórico 12 Meses")
+    fig = px.line(df_chart, x='data_date', y='acum_12m', title=f"Histórico 12 Meses - {tipo_indice.split()[0]}")
+    
+    # Visual Dark
     fig.update_traces(line_color=cor_tema, line_width=3)
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        font=dict(color="#E0E0E0"),
+        hovermode="x unified",
+        margin=dict(l=0, r=0, t=40, b=0)
+    )
+    fig.update_yaxes(showgrid=True, gridcolor='#333333', ticksuffix="%")
+    fig.update_xaxes(showgrid=False)
+    
     st.plotly_chart(fig, use_container_width=True)
 
+# MATRIZ PRINCIPAL
 with tab2:
     try:
         matrix = df.pivot(index='ano', columns='mes_nome', values='valor')
@@ -459,5 +422,10 @@ with tab2:
     except:
         st.warning("Matriz indisponível.")
 
+# TABELA PRINCIPAL (COM DOWNLOAD)
 with tab3:
+    # Botão Download
+    csv_principal = df[['data_fmt', 'valor', 'acum_ano', 'acum_12m']].to_csv(index=False).encode('utf-8')
+    st.download_button("📥 Baixar dados em CSV", csv_principal, f"{tipo_indice.split()[0]}_historico.csv", "text/csv")
+
     st.dataframe(df[['data_fmt', 'valor', 'acum_ano', 'acum_12m']], use_container_width=True, hide_index=True)

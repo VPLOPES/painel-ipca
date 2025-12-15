@@ -119,7 +119,7 @@ def calcular_correcao(df, valor, data_ini_code, data_fim_code):
     }, None
 
 # --- SIDEBAR E SELEÇÃO DE ÍNDICE ---
-st.sidebar.image("VPL_Consultoria_Financeira.jpeg", use_container_width=True)
+st.sidebar.image("Logo_VPL_Consultoria_Financeira.png", use_container_width=True)
 st.sidebar.header("Configurações")
 
 # ** SELETOR DE ÍNDICE **

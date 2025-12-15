@@ -72,30 +72,42 @@ def get_bcb_data(codigo_serie):
 @st.cache_data(ttl=3600)
 def get_focus_data():
     try:
-        # URL corrigida e com user-agent para evitar bloqueio
         url = "https://olinda.bcb.gov.br/olinda/servico/Expectativas/versao/v1/odata/ExpectativasMercadoAnuais?$top=1000&$orderby=Data%20desc&$format=json"
         
+        # Usamos requests para garantir o download
         response = requests.get(url)
         data_json = response.json()
         
         df = pd.DataFrame(data_json['value'])
         
+        # Filtros
         indicadores = ['IPCA', 'PIB Total', 'Selic', 'Câmbio']
         df = df[df['Indicador'].isin(indicadores)]
         df = df.rename(columns={'Data': 'data_relatorio', 'DataReferencia': 'ano_referencia', 'Mediana': 'previsao'})
+        
+        # --- A CORREÇÃO MÁGICA ---
+        # Converte o ano para número inteiro para garantir que o filtro funcione
+        df['ano_referencia'] = df['ano_referencia'].astype(int)
         df['data_relatorio'] = pd.to_datetime(df['data_relatorio'])
+        
         return df
     except Exception as e:
-        return pd.DataFrame() # Retorna vazio se der erro
+        print(f"Erro Focus: {e}") # Print no terminal para debug
+        return pd.DataFrame()
 
-# 4. Cotação de Moedas
+# 4. Cotação de Moedas (Mais robusto)
 @st.cache_data(ttl=300)
 def get_currency_data():
     try:
         url = "https://economia.awesomeapi.com.br/last/USD-BRL,EUR-BRL"
-        df = pd.read_json(url).T
+        response = requests.get(url, timeout=5) # Timeout evita travamento
+        data = response.json()
+        
+        # Converte o JSON direto para DataFrame
+        df = pd.DataFrame.from_dict(data, orient='index')
         return df
-    except:
+    except Exception as e:
+        print(f"Erro Moedas: {e}")
         return pd.DataFrame()
 
 # 5. Processamento Comum
@@ -138,7 +150,7 @@ def calcular_correcao(df, valor, data_ini_code, data_fim_code):
 # ==============================================================================
 # LAYOUT - SIDEBAR
 # ==============================================================================
-st.sidebar.image("VPL_Consultoria_Financeira.jpeg", use_container_width=True)
+st.sidebar.image("Logo_VPL_Consultoria_Financeira.png", use_container_width=True)
 st.sidebar.header("Configurações")
 
 tipo_indice = st.sidebar.selectbox(

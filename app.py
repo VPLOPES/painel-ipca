@@ -3,15 +3,16 @@ import sidrapy
 import pandas as pd
 import numpy as np
 import plotly.express as px
+from datetime import date
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(
-    page_title="Calculadora IPCA Pro",
+    page_title="Calculadora de Inflação Pro",
     page_icon="💰",
     layout="wide"
 )
 
-# Estilo CSS personalizado para ficar com cara de "Sistema"
+# Estilo CSS
 st.markdown("""
 <style>
     .metric-card {
@@ -20,210 +21,196 @@ st.markdown("""
         padding: 20px;
         border-radius: 10px;
     }
-    .big-font {
-        font-size: 24px !important;
-        font-weight: bold;
-        color: #003366;
-    }
 </style>
 """, unsafe_allow_html=True)
 
-# --- FUNÇÃO DE CARGA DE DADOS (COM CACHE) ---
-# O @st.cache_data impede que o app baixe os dados do IBGE a cada clique.
-# Ele baixa uma vez e guarda na memória.
+# --- FUNÇÕES DE CARGA DE DADOS ---
+
+# 1. Dados do IBGE (Sidra) - Serve para IPCA e INPC
 @st.cache_data
-def get_ipca_data():
+def get_sidra_data(table_code, variable_code):
     try:
-        # Busca últimos 30 anos (aprox 360 meses)
-        ipca_raw = sidrapy.get_table(
-            table_code="1737", 
+        # Busca últimos 30 anos
+        dados_raw = sidrapy.get_table(
+            table_code=table_code, 
             territorial_level="1", 
             ibge_territorial_code="all", 
-            variable="63", 
+            variable=variable_code, 
             period="last 360"
         )
         
-        # Limpeza
-        df = ipca_raw.iloc[1:].copy()
+        df = dados_raw.iloc[1:].copy()
         df.rename(columns={'V': 'valor', 'D2N': 'mes_ano'}, inplace=True)
         df['valor'] = pd.to_numeric(df['valor'])
+        df['data_date'] = pd.to_datetime(df['D2C'], format="%Y%m") # Auxiliar para ordenação
         df['ano'] = df['D2C'].str.slice(0, 4)
-        df['mes_num'] = df['D2C'].str.slice(4, 6).astype(int)
         
-        # Mapeamento de meses
-        meses_map = {1: 'Jan', 2: 'Fev', 3: 'Mar', 4: 'Abr', 5: 'Mai', 6: 'Jun',
-                     7: 'Jul', 8: 'Ago', 9: 'Set', 10: 'Out', 11: 'Nov', 12: 'Dez'}
-        df['mes_nome'] = df['mes_num'].map(meses_map)
-        df['data_fmt'] = df['mes_nome'] + '/' + df['ano']
-        
-        # Cálculos Auxiliares (Fator, Acumulados)
-        df = df.sort_values('D2C', ascending=True) # Cronológico
-        df['fator'] = 1 + (df['valor'] / 100)
-        df['acum_ano'] = (df.groupby('ano')['fator'].cumprod() - 1) * 100
-        df['acum_12m'] = (df['fator'].rolling(window=12).apply(np.prod, raw=True) - 1) * 100
-        
-        return df.sort_values('D2C', ascending=False) # Retorna do mais recente pro antigo
+        return processar_dataframe_comum(df)
     except Exception as e:
         st.error(f"Erro ao buscar dados do IBGE: {e}")
         return pd.DataFrame()
 
-# --- FUNÇÃO DE CÁLCULO INTELIGENTE (IDA E VOLTA) ---
+# 2. Dados do Banco Central (SGS) - Serve para IGP-M
+@st.cache_data
+def get_bcb_data(codigo_serie):
+    try:
+        # URL oficial da API do Banco Central
+        url = f"http://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo_serie}/dados?formato=json"
+        df = pd.read_json(url)
+        
+        # O BCB retorna: 'data' (dd/mm/aaaa) e 'valor'
+        df['data_date'] = pd.to_datetime(df['data'], format='%d/%m/%Y')
+        df['valor'] = pd.to_numeric(df['valor'])
+        
+        # Criar a coluna D2C (YYYYMM) para compatibilidade com o resto do sistema
+        df['D2C'] = df['data_date'].dt.strftime('%Y%m')
+        df['ano'] = df['data_date'].dt.strftime('%Y')
+        df['mes_ano'] = df['data_date'].dt.strftime('%B %Y') # Nome provisório
+        
+        return processar_dataframe_comum(df)
+    except Exception as e:
+        st.error(f"Erro ao buscar dados do BCB: {e}")
+        return pd.DataFrame()
+
+# 3. Processamento Comum (Padroniza tudo para o App)
+def processar_dataframe_comum(df):
+    # Garante ordenação cronológica para cálculos
+    df = df.sort_values('data_date', ascending=True)
+    
+    # Mapeamento de meses (PT-BR)
+    df['mes_num'] = df['data_date'].dt.month
+    meses_map = {1: 'Jan', 2: 'Fev', 3: 'Mar', 4: 'Abr', 5: 'Mai', 6: 'Jun',
+                 7: 'Jul', 8: 'Ago', 9: 'Set', 10: 'Out', 11: 'Nov', 12: 'Dez'}
+    df['mes_nome'] = df['mes_num'].map(meses_map)
+    df['data_fmt'] = df['mes_nome'] + '/' + df['ano']
+    
+    # Cálculos Financeiros
+    df['fator'] = 1 + (df['valor'] / 100)
+    df['acum_ano'] = (df.groupby('ano')['fator'].cumprod() - 1) * 100
+    df['acum_12m'] = (df['fator'].rolling(window=12).apply(np.prod, raw=True) - 1) * 100
+    
+    return df.sort_values('data_date', ascending=False) # Retorna do mais recente pro antigo
+
+# --- FUNÇÃO DE CÁLCULO (A mesma de antes) ---
 def calcular_correcao(df, valor, data_ini_code, data_fim_code):
-    # Detecta se é cálculo reverso (Deflação/Volta no tempo)
     is_reverso = data_ini_code > data_fim_code
     
-    # Define o intervalo cronológico correto para filtrar o DataFrame
     if is_reverso:
-        periodo_inicio = data_fim_code
-        periodo_fim = data_ini_code
+        periodo_inicio, periodo_fim = data_fim_code, data_ini_code
     else:
-        periodo_inicio = data_ini_code
-        periodo_fim = data_fim_code
+        periodo_inicio, periodo_fim = data_ini_code, data_fim_code
         
-    # Filtra os dados
     mask = (df['D2C'] >= periodo_inicio) & (df['D2C'] <= periodo_fim)
     df_periodo = df.loc[mask].copy()
     
     if df_periodo.empty:
         return None, "Período sem dados suficientes."
         
-    # Calcula o Fator Acumulado do período
     fator_acumulado = df_periodo['fator'].prod()
     
-    # Aplica a matemática financeira
-    if is_reverso:
-        # Trazendo valor futuro para presente (Divisão)
-        valor_final = valor / fator_acumulado
-    else:
-        # Levando valor presente para futuro (Multiplicação)
-        valor_final = valor * fator_acumulado
-        
+    valor_final = valor / fator_acumulado if is_reverso else valor * fator_acumulado
     pct_total = (fator_acumulado - 1) * 100
     
     return {
         'valor_final': valor_final,
         'percentual': pct_total,
         'fator': fator_acumulado,
-        'is_reverso': is_reverso,
-        'meses': len(df_periodo)
+        'is_reverso': is_reverso
     }, None
 
-# --- CARREGANDO DADOS ---
-with st.spinner("Conectando ao IBGE..."):
-    df = get_ipca_data()
+# --- SIDEBAR E SELEÇÃO DE ÍNDICE ---
+st.sidebar.image("VPL_Consultoria_Financeira.jpeg", use_container_width=True)
+st.sidebar.header("Configurações")
+
+# ** SELETOR DE ÍNDICE **
+tipo_indice = st.sidebar.selectbox(
+    "Selecione o Índice Econômico",
+    ["IPCA (Inflação Oficial)", "IGP-M (Aluguéis)", "INPC (Salários)"]
+)
+
+# Lógica para carregar o dado certo
+with st.spinner(f"Carregando dados do {tipo_indice}..."):
+    if "IPCA" in tipo_indice:
+        df = get_sidra_data("1737", "63") # Tabela 1737, Var 63 (IPCA)
+        cor_tema = "#003366" # Azul
+    elif "INPC" in tipo_indice:
+        df = get_sidra_data("1737", "44") # Tabela 1737, Var 44 (INPC)
+        cor_tema = "#2E8B57" # Verde SeaGreen
+    elif "IGP-M" in tipo_indice:
+        df = get_bcb_data("189") # Série 189 do BCB (IGP-M Mensal)
+        cor_tema = "#8B0000" # Vermelho Escuro
 
 if df.empty:
     st.stop()
 
-# --- INTERFACE (SIDEBAR) ---
-st.sidebar.image("Logo_VPL_Consultoria_Financeira.png", use_container_width=True) 
-
-st.sidebar.header("Parâmetros")
-
+# --- INPUTS DA CALCULADORA ---
+st.sidebar.divider()
+st.sidebar.subheader("Calculadora")
 valor_input = st.sidebar.number_input("Valor (R$)", value=1000.00, step=100.00, format="%.2f")
 
-st.sidebar.subheader("Período")
-
-# Preparar listas para os dropdowns
+# Listas para Data
 lista_anos = sorted(df['ano'].unique(), reverse=True)
 lista_meses_nome = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez']
 mapa_meses = {'Jan': '01', 'Fev': '02', 'Mar': '03', 'Abr': '04', 'Mai': '05', 'Jun': '06',
               'Jul': '07', 'Ago': '08', 'Set': '09', 'Out': '10', 'Nov': '11', 'Dez': '12'}
 
-# --- DATA INICIAL ---
-st.sidebar.markdown("**Data de Referência**")
+# Seletores
+st.sidebar.markdown("**Data Referência**")
 c1, c2 = st.sidebar.columns(2)
-with c1:
-    mes_ini = st.selectbox("Mês Ini", lista_meses_nome, index=0, label_visibility="collapsed")
-with c2:
-    # Tenta selecionar 1 ano atrás como padrão
-    idx_ano_ini = 1 if len(lista_anos) > 1 else 0
-    ano_ini = st.selectbox("Ano Ini", lista_anos, index=idx_ano_ini, label_visibility="collapsed")
+mes_ini = c1.selectbox("Mes Ini", lista_meses_nome, index=0, label_visibility="collapsed")
+ano_ini = c2.selectbox("Ano Ini", lista_anos, index=1 if len(lista_anos)>1 else 0, label_visibility="collapsed")
 
-# --- DATA FINAL ---
 st.sidebar.markdown("**Data Alvo**")
 c3, c4 = st.sidebar.columns(2)
-with c3:
-    mes_fim = st.selectbox("Mês Fim", lista_meses_nome, index=9, label_visibility="collapsed") # Ex: Outubro
-with c4:
-    ano_fim = st.selectbox("Ano Fim", lista_anos, index=0, label_visibility="collapsed")
+mes_fim = c3.selectbox("Mes Fim", lista_meses_nome, index=9, label_visibility="collapsed")
+ano_fim = c4.selectbox("Ano Fim", lista_anos, index=0, label_visibility="collapsed")
 
 if st.sidebar.button("Calcular Correção", type="primary"):
-    # Reconstruir o código D2C (YYYYMM)
     code_ini = f"{ano_ini}{mapa_meses[mes_ini]}"
     code_fim = f"{ano_fim}{mapa_meses[mes_fim]}"
     
-    # Chama a função de cálculo
     res, erro = calcular_correcao(df, valor_input, code_ini, code_fim)
     
     if erro:
         st.error(erro)
     else:
-        # (O resto do código de exibição do resultado continua igual...)
         st.sidebar.divider()
-        st.sidebar.markdown("### Resultado")
-        cor_valor = "#d32f2f" if res['is_reverso'] else "#2e7d32"
-        texto_op = "Deflação (Reverso)" if res['is_reverso'] else "Correção (IPCA)"
-        
-        st.sidebar.markdown(f"<p style='font-size: 12px; margin:0;'>Operação: <b>{texto_op}</b></p>", unsafe_allow_html=True)
-        st.sidebar.markdown(f"<h2 style='color: {cor_valor}; margin:0;'>R$ {res['valor_final']:,.2f}</h2>", unsafe_allow_html=True)
-        st.sidebar.markdown(f"Inflação Período: **{res['percentual']:.2f}%**")
-        st.sidebar.markdown(f"Fator: **{res['fator']:.6f}**")
+        texto_op = "Deflação (Reverso)" if res['is_reverso'] else f"Correção ({tipo_indice.split()[0]})"
+        st.sidebar.markdown(f"<small>{texto_op}</small>", unsafe_allow_html=True)
+        st.sidebar.markdown(f"<h2 style='color: {cor_tema}; margin:0;'>R$ {res['valor_final']:,.2f}</h2>", unsafe_allow_html=True)
+        st.sidebar.markdown(f"Acumulado: **{res['percentual']:.2f}%**")
 
-        
-# --- INTERFACE (MAIN) ---
-st.title("📊 Painel IPCA")
-st.markdown(f"**Dados atualizados até:** {df.iloc[0]['data_fmt']} | Fonte: IBGE (SIDRA)")
+# --- ÁREA PRINCIPAL ---
+st.title(f"📊 Painel Econômico: {tipo_indice.split()[0]}")
+st.markdown(f"**Dados atualizados até:** {df.iloc[0]['data_fmt']}")
 
-# KPIs Topo
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("IPCA do Último Mês", f"{df.iloc[0]['valor']:.2f}%")
-col2.metric("Acumulado 12 Meses", f"{df.iloc[0]['acum_12m']:.2f}%")
-col3.metric("Acumulado Ano (YTD)", f"{df.iloc[0]['acum_ano']:.2f}%")
-col4.metric("Início da Série", df['ano'].min())
+# KPIs
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Índice do Mês", f"{df.iloc[0]['valor']:.2f}%")
+c2.metric("Acumulado 12 Meses", f"{df.iloc[0]['acum_12m']:.2f}%")
+c3.metric("Acumulado Ano (YTD)", f"{df.iloc[0]['acum_ano']:.2f}%")
+c4.metric("Início da Série", df['ano'].min())
 
 st.divider()
 
 # Abas
-tab1, tab2, tab3 = st.tabs(["📈 Evolução Gráfica", "📅 Matriz de Calor", "📋 Tabela Detalhada"])
+tab1, tab2, tab3 = st.tabs(["📈 Gráfico", "📅 Matriz", "📋 Tabela"])
 
 with tab1:
-    st.subheader("IPCA Acumulado (12 Meses)")
-    df_chart = df.dropna(subset=['acum_12m']).sort_values('D2C')
-    
-    fig = px.line(df_chart, x='mes_ano', y='acum_12m', markers=False)
-    fig.update_traces(line_color='#003366', line_width=3)
-    fig.update_layout(yaxis_title="%", xaxis_title=None, height=400)
-    
+    df_chart = df.dropna(subset=['acum_12m']).sort_values('data_date')
+    fig = px.line(df_chart, x='data_date', y='acum_12m', title=f"Evolução {tipo_indice} (12 meses)")
+    fig.update_traces(line_color=cor_tema, line_width=3)
     st.plotly_chart(fig, use_container_width=True)
 
 with tab2:
-    st.subheader("Mapa de Calor da Inflação Mensal")
-    # Pivotando para Matriz
-    matrix = df.pivot(index='ano', columns='mes_nome', values='valor')
-    ordem_meses = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez']
-    matrix = matrix[ordem_meses].sort_index(ascending=False)
-    
-    # Usando o dataframe com gradiente de cor nativo do Streamlit
-    st.dataframe(
-        matrix.style.background_gradient(cmap='RdYlGn_r', axis=None, vmin=-0.5, vmax=1.5).format("{:.2f}"),
-        use_container_width=True,
-        height=600
-    )
+    try:
+        matrix = df.pivot(index='ano', columns='mes_nome', values='valor')
+        ordem = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez']
+        matrix = matrix[ordem].sort_index(ascending=False)
+        st.dataframe(matrix.style.background_gradient(cmap='RdYlGn_r', axis=None, vmin=-0.5, vmax=1.5).format("{:.2f}"), use_container_width=True, height=500)
+    except:
+        st.warning("Dados insuficientes para gerar a matriz completa.")
 
 with tab3:
-    st.subheader("Dados Históricos")
+    st.dataframe(df[['data_fmt', 'valor', 'acum_ano', 'acum_12m']], use_container_width=True, hide_index=True)
     
-    df_show = df[['data_fmt', 'valor', 'acum_ano', 'acum_12m']].copy()
-    df_show.columns = ['Mês/Ano', 'IPCA Mês (%)', 'Acum. Ano (%)', 'Acum. 12m (%)']
-    
-    st.dataframe(
-        df_show,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "IPCA Mês (%)": st.column_config.NumberColumn(format="%.2f %%"),
-            "Acum. Ano (%)": st.column_config.NumberColumn(format="%.2f %%"),
-            "Acum. 12m (%)": st.column_config.NumberColumn(format="%.2f %%"),
-        }
-    )

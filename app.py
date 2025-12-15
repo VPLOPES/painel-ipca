@@ -22,12 +22,12 @@ st.markdown("""
         padding: 15px;
         border-radius: 8px;
     }
-    /* Estilo para o Expander ficar mais destacado */
     .streamlit-expanderHeader {
-        background-color: #f0f2f6;
+        background-color: #f8f9fa;
         border-radius: 5px;
-        font-weight: bold;
+        font-weight: 600;
         color: #003366;
+        border: 1px solid #ddd;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -39,11 +39,8 @@ st.markdown("""
 def get_sidra_data(table_code, variable_code):
     try:
         dados_raw = sidrapy.get_table(
-            table_code=table_code, 
-            territorial_level="1", 
-            ibge_territorial_code="all", 
-            variable=variable_code, 
-            period="last 360"
+            table_code=table_code, territorial_level="1", ibge_territorial_code="all", 
+            variable=variable_code, period="last 360"
         )
         df = dados_raw.iloc[1:].copy()
         df.rename(columns={'V': 'valor', 'D2N': 'mes_ano'}, inplace=True)
@@ -54,7 +51,7 @@ def get_sidra_data(table_code, variable_code):
     except Exception as e:
         return pd.DataFrame()
 
-# 2. Banco Central (SGS)
+# 2. Banco Central (SGS - Índices Mensais)
 @st.cache_data
 def get_bcb_data(codigo_serie):
     try:
@@ -65,52 +62,68 @@ def get_bcb_data(codigo_serie):
         df['D2C'] = df['data_date'].dt.strftime('%Y%m')
         df['ano'] = df['data_date'].dt.strftime('%Y')
         return processar_dataframe_comum(df)
-    except Exception as e:
+    except:
         return pd.DataFrame()
 
-# 3. Boletim Focus (Robusto)
+# 3. Boletim Focus
 @st.cache_data(ttl=3600)
 def get_focus_data():
     try:
         url = "https://olinda.bcb.gov.br/olinda/servico/Expectativas/versao/v1/odata/ExpectativasMercadoAnuais?$top=1000&$orderby=Data%20desc&$format=json"
-        
-        # Usamos requests para garantir o download
         response = requests.get(url)
         data_json = response.json()
-        
         df = pd.DataFrame(data_json['value'])
-        
-        # Filtros
         indicadores = ['IPCA', 'PIB Total', 'Selic', 'Câmbio']
         df = df[df['Indicador'].isin(indicadores)]
         df = df.rename(columns={'Data': 'data_relatorio', 'DataReferencia': 'ano_referencia', 'Mediana': 'previsao'})
-        
-        # --- A CORREÇÃO MÁGICA ---
-        # Converte o ano para número inteiro para garantir que o filtro funcione
         df['ano_referencia'] = df['ano_referencia'].astype(int)
         df['data_relatorio'] = pd.to_datetime(df['data_relatorio'])
-        
         return df
-    except Exception as e:
-        print(f"Erro Focus: {e}") # Print no terminal para debug
+    except:
         return pd.DataFrame()
 
-# 4. Cotação de Moedas (Mais robusto)
+# 4. Cotação de Moedas (Tempo Real)
 @st.cache_data(ttl=300)
-def get_currency_data():
+def get_currency_realtime():
     try:
         url = "https://economia.awesomeapi.com.br/last/USD-BRL,EUR-BRL"
-        response = requests.get(url, timeout=5) # Timeout evita travamento
+        response = requests.get(url, timeout=5)
         data = response.json()
-        
-        # Converte o JSON direto para DataFrame
         df = pd.DataFrame.from_dict(data, orient='index')
         return df
-    except Exception as e:
-        print(f"Erro Moedas: {e}")
+    except:
         return pd.DataFrame()
 
-# 5. Processamento Comum
+# 5. NOVO: Histórico de Câmbio (BCB - Séries Diárias)
+@st.cache_data(ttl=86400) # Cache de 24h
+def get_cambio_historico():
+    try:
+        # Série 1: Dólar (Venda) | Série 21619: Euro (Venda)
+        url_usd = "http://api.bcb.gov.br/dados/serie/bcdata.sgs.1/dados?formato=json"
+        url_eur = "http://api.bcb.gov.br/dados/serie/bcdata.sgs.21619/dados?formato=json"
+        
+        df_usd = pd.read_json(url_usd)
+        df_eur = pd.read_json(url_eur)
+        
+        # Tratamento USD
+        df_usd['data'] = pd.to_datetime(df_usd['data'], format='%d/%m/%Y')
+        df_usd = df_usd.rename(columns={'valor': 'Dólar'})
+        df_usd = df_usd.set_index('data')
+        
+        # Tratamento EUR
+        df_eur['data'] = pd.to_datetime(df_eur['data'], format='%d/%m/%Y')
+        df_eur = df_eur.rename(columns={'valor': 'Euro'})
+        df_eur = df_eur.set_index('data')
+        
+        # Juntar tudo e filtrar a partir do Plano Real (01/07/1994)
+        df_final = df_usd.join(df_eur, how='outer')
+        df_final = df_final[df_final.index >= '1994-07-01']
+        
+        return df_final
+    except:
+        return pd.DataFrame()
+
+# 6. Processamento Comum
 def processar_dataframe_comum(df):
     df = df.sort_values('data_date', ascending=True)
     df['mes_num'] = df['data_date'].dt.month
@@ -130,21 +143,18 @@ def calcular_correcao(df, valor, data_ini_code, data_fim_code):
         periodo_inicio, periodo_fim = data_fim_code, data_ini_code
     else:
         periodo_inicio, periodo_fim = data_ini_code, data_fim_code
-        
+    
     mask = (df['D2C'] >= periodo_inicio) & (df['D2C'] <= periodo_fim)
     df_periodo = df.loc[mask].copy()
     
     if df_periodo.empty:
         return None, "Período sem dados suficientes."
-        
+    
     fator_acumulado = df_periodo['fator'].prod()
     valor_final = valor / fator_acumulado if is_reverso else valor * fator_acumulado
     pct_total = (fator_acumulado - 1) * 100
     return {
-        'valor_final': valor_final,
-        'percentual': pct_total,
-        'fator': fator_acumulado,
-        'is_reverso': is_reverso
+        'valor_final': valor_final, 'percentual': pct_total, 'fator': fator_acumulado, 'is_reverso': is_reverso
     }, None
 
 # ==============================================================================
@@ -216,15 +226,14 @@ if st.sidebar.button("Calcular", type="primary"):
         st.sidebar.markdown(f"Total Período: **{res['percentual']:.2f}%**")
 
 # ==============================================================================
-# ÁREA SUPERIOR: EXPANDER DE MERCADO (CLICÁVEL)
+# ÁREA SUPERIOR: EXPANDERS
 # ==============================================================================
 
-# O "expanded=False" garante que ele comece fechado
-with st.expander("🔭 Clique para ver: Expectativas de Mercado (Focus) & Câmbio", expanded=False):
-    
+# 1. BOLETIM FOCUS
+with st.expander("🔭 Clique para ver: Expectativas de Mercado (Focus) & Câmbio Hoje", expanded=False):
     col_top1, col_top2 = st.columns([2, 1])
     
-    # --- DADOS FOCUS ---
+    # FOCUS
     df_focus = get_focus_data()
     ano_atual = date.today().year
     
@@ -235,9 +244,8 @@ with st.expander("🔭 Clique para ver: Expectativas de Mercado (Focus) & Câmbi
             df_view = df_last[df_last['ano_referencia'] == ano_atual]
             df_pivot = df_view.pivot_table(index='Indicador', columns='ano_referencia', values='previsao', aggfunc='mean')
             
-            # Formatação da data para título
             data_str = pd.to_datetime(ultima_data).strftime('%d/%m/%Y')
-            st.markdown(f"**Boletim Focus ({data_str}) - Previsão Fim de {ano_atual}**")
+            st.markdown(f"**Boletim Focus ({data_str}) - Fim de {ano_atual}**")
             
             fc1, fc2, fc3, fc4 = st.columns(4)
             ipca_f = df_pivot.get(ano_atual, {}).get('IPCA', 0)
@@ -250,12 +258,12 @@ with st.expander("🔭 Clique para ver: Expectativas de Mercado (Focus) & Câmbi
             fc3.metric("PIB", f"{pib_f:.2f}%")
             fc4.metric("Dólar", f"R$ {cambio_f:.2f}")
         else:
-            st.warning("Dados do Focus indisponíveis no momento.")
+            st.warning("Focus indisponível.")
 
-    # --- DADOS MOEDAS ---
-    df_moedas = get_currency_data()
+    # MOEDAS
+    df_moedas = get_currency_realtime()
     with col_top2:
-        st.markdown("**Câmbio (Tempo Real)**")
+        st.markdown("**Câmbio (Agora)**")
         mc1, mc2 = st.columns(2)
         if not df_moedas.empty:
             try:
@@ -264,9 +272,38 @@ with st.expander("🔭 Clique para ver: Expectativas de Mercado (Focus) & Câmbi
                 mc1.metric("Dólar", f"R$ {float(usd['bid']):.2f}", f"{float(usd['pctChange']):.2f}%")
                 mc2.metric("Euro", f"R$ {float(eur['bid']):.2f}", f"{float(eur['pctChange']):.2f}%")
             except:
-                st.info("Erro visualização moedas")
+                st.info("Erro moedas")
         else:
             st.info("API indisponível")
+
+# 2. HISTÓRICO DE CÂMBIO (NOVO!)
+with st.expander("💸 Histórico de Câmbio (Dólar e Euro desde 1994)", expanded=False):
+    st.markdown("Evolução das moedas frente ao Real (R$) desde o início do Plano Real.")
+    
+    # Carrega dados
+    df_cambio = get_cambio_historico()
+    
+    if not df_cambio.empty:
+        # Gráfico interativo
+        fig_cambio = px.line(df_cambio, x=df_cambio.index, y=['Dólar', 'Euro'], 
+                             labels={'value': 'Preço (R$)', 'variable': 'Moeda', 'data': 'Data'})
+        
+        # Personalização do gráfico
+        fig_cambio.update_layout(hovermode="x unified", legend=dict(orientation="h", y=1.02, x=0))
+        fig_cambio.update_xaxes(
+            rangeslider_visible=True, # Slider de zoom na parte inferior
+            rangeselector=dict(
+                buttons=list([
+                    dict(count=1, label="1 Ano", step="year", stepmode="backward"),
+                    dict(count=5, label="5 Anos", step="year", stepmode="backward"),
+                    dict(count=10, label="10 Anos", step="year", stepmode="backward"),
+                    dict(step="all", label="Tudo")
+                ])
+            )
+        )
+        st.plotly_chart(fig_cambio, use_container_width=True)
+    else:
+        st.warning("Não foi possível carregar o histórico do Banco Central.")
 
 # ==============================================================================
 # ÁREA PRINCIPAL: DETALHES DO ÍNDICE

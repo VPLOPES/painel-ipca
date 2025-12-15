@@ -7,22 +7,29 @@ from datetime import date
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(
-    page_title="VPL Consultoria - Calculadora Pro",
-    page_icon="💰",
+    page_title="VPL Consultoria - Inteligência Financeira",
+    page_icon="📈",
     layout="wide"
 )
 
-# Estilo CSS
+# Estilo CSS para dar um visual "Dashboard"
 st.markdown("""
 <style>
     .metric-card {
-        background-color: #f0f2f6;
-        border-left: 5px solid #003366;
+        background-color: #ffffff;
+        border: 1px solid #e0e0e0;
+        padding: 15px;
+        border-radius: 8px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+    }
+    .main-header {
+        background-color: #f8f9fa;
         padding: 20px;
         border-radius: 10px;
+        margin-bottom: 20px;
+        border-left: 5px solid #003366;
     }
-    /* Ajuste para tabela do Focus */
-    .stDataFrame { font-size: 0.9rem; }
+    h3 { color: #003366; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -46,10 +53,9 @@ def get_sidra_data(table_code, variable_code):
         df['ano'] = df['D2C'].str.slice(0, 4)
         return processar_dataframe_comum(df)
     except Exception as e:
-        st.error(f"Erro ao buscar dados do IBGE: {e}")
         return pd.DataFrame()
 
-# 2. Banco Central (SGS - Séries Históricas)
+# 2. Banco Central (SGS)
 @st.cache_data
 def get_bcb_data(codigo_serie):
     try:
@@ -61,40 +67,39 @@ def get_bcb_data(codigo_serie):
         df['ano'] = df['data_date'].dt.strftime('%Y')
         return processar_dataframe_comum(df)
     except Exception as e:
-        st.error(f"Erro ao buscar dados do BCB: {e}")
         return pd.DataFrame()
 
-# 3. NOVO: Banco Central (API Olinda - Boletim Focus)
-@st.cache_data
+# 3. Boletim Focus (Corrigido)
+@st.cache_data(ttl=3600) # Cache de 1 hora
 def get_focus_data():
     try:
-        # Busca as últimas 500 entradas da expectativa de mercado anual
-        url = "https://olinda.bcb.gov.br/olinda/servico/Expectativas/versao/v1/odata/ExpectativasMercadoAnuais?$top=1000&$orderby=Data desc&$format=json"
+        # CORREÇÃO AQUI: Trocamos espaço por %20
+        url = "https://olinda.bcb.gov.br/olinda/servico/Expectativas/versao/v1/odata/ExpectativasMercadoAnuais?$top=1000&$orderby=Data%20desc&$format=json"
         
-        # Lendo o JSON
         data_json = pd.read_json(url)
         df = pd.DataFrame(data_json['value'].tolist())
         
-        # Filtros básicos (queremos apenas os indicadores principais)
         indicadores = ['IPCA', 'PIB Total', 'Selic', 'Câmbio']
         df = df[df['Indicador'].isin(indicadores)]
-        
-        # Renomear para facilitar
-        df = df.rename(columns={
-            'Data': 'data_relatorio',
-            'DataReferencia': 'ano_referencia',
-            'Mediana': 'previsao'
-        })
-        
-        # Converter data
+        df = df.rename(columns={'Data': 'data_relatorio', 'DataReferencia': 'ano_referencia', 'Mediana': 'previsao'})
         df['data_relatorio'] = pd.to_datetime(df['data_relatorio'])
-        
         return df
     except Exception as e:
-        st.error(f"Erro ao buscar Focus: {e}")
+        st.error(f"Erro Focus: {e}")
         return pd.DataFrame()
 
-# 4. Processamento Comum
+# 4. Cotação de Moedas (Novo)
+@st.cache_data(ttl=300) # Cache de 5 minutos
+def get_currency_data():
+    try:
+        # API AwesomeAPI (Gratuita e Rápida)
+        url = "https://economia.awesomeapi.com.br/last/USD-BRL,EUR-BRL"
+        df = pd.read_json(url).T # Transpor para ficar em linhas
+        return df
+    except:
+        return pd.DataFrame()
+
+# 5. Processamento Comum
 def processar_dataframe_comum(df):
     df = df.sort_values('data_date', ascending=True)
     df['mes_num'] = df['data_date'].dt.month
@@ -107,7 +112,7 @@ def processar_dataframe_comum(df):
     df['acum_12m'] = (df['fator'].rolling(window=12).apply(np.prod, raw=True) - 1) * 100
     return df.sort_values('data_date', ascending=False)
 
-# --- CÁLCULO DA CALCULADORA ---
+# --- CÁLCULO ---
 def calcular_correcao(df, valor, data_ini_code, data_fim_code):
     is_reverso = data_ini_code > data_fim_code
     if is_reverso:
@@ -124,7 +129,6 @@ def calcular_correcao(df, valor, data_ini_code, data_fim_code):
     fator_acumulado = df_periodo['fator'].prod()
     valor_final = valor / fator_acumulado if is_reverso else valor * fator_acumulado
     pct_total = (fator_acumulado - 1) * 100
-    
     return {
         'valor_final': valor_final,
         'percentual': pct_total,
@@ -132,7 +136,11 @@ def calcular_correcao(df, valor, data_ini_code, data_fim_code):
         'is_reverso': is_reverso
     }, None
 
-# --- SIDEBAR ---
+# ==============================================================================
+# LAYOUT DO APLICATIVO
+# ==============================================================================
+
+# SIDEBAR
 st.sidebar.image("Logo_VPL_Consultoria_Financeira.png", use_container_width=True)
 st.sidebar.header("Configurações")
 
@@ -159,9 +167,10 @@ with st.spinner(f"Carregando dados..."):
         cor_tema = "#333333"
 
 if df.empty:
+    st.error("Erro ao carregar dados do índice selecionado.")
     st.stop()
 
-# --- INPUTS CALCULADORA ---
+# --- CALCULADORA (SIDEBAR) ---
 st.sidebar.divider()
 st.sidebar.subheader("Calculadora")
 valor_input = st.sidebar.number_input("Valor (R$)", value=1000.00, step=100.00, format="%.2f")
@@ -193,25 +202,81 @@ if st.sidebar.button("Calcular", type="primary"):
         nome_indice = tipo_indice.split()[0]
         tipo_op = "Rendimento" if nome_indice in ["SELIC", "CDI"] else "Correção"
         texto_op = "Descapitalização" if res['is_reverso'] else f"{tipo_op} ({nome_indice})"
-        
         st.sidebar.markdown(f"<small>{texto_op}</small>", unsafe_allow_html=True)
         st.sidebar.markdown(f"<h2 style='color: {cor_tema}; margin:0;'>R$ {res['valor_final']:,.2f}</h2>", unsafe_allow_html=True)
         st.sidebar.markdown(f"Total Período: **{res['percentual']:.2f}%**")
 
-# --- MAIN ---
-st.title(f"📊 Painel Financeiro: {tipo_indice.split()[0]}")
-st.markdown(f"**Dados até:** {df.iloc[0]['data_fmt']}")
+# ==============================================================================
+# ÁREA SUPERIOR: DASHBOARD DE MERCADO (Onde você marcou em vermelho)
+# ==============================================================================
 
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Taxa do Mês", f"{df.iloc[0]['valor']:.2f}%")
-c2.metric("Acumulado 12 Meses", f"{df.iloc[0]['acum_12m']:.2f}%")
-c3.metric("Acumulado Ano (YTD)", f"{df.iloc[0]['acum_ano']:.2f}%")
-c4.metric("Início da Série", df['ano'].min())
+st.markdown("<div class='main-header'><h3>🔭 Visão de Mercado (Focus & Moedas)</h3></div>", unsafe_allow_html=True)
+
+# Buscar dados do Topo
+df_focus = get_focus_data()
+df_moedas = get_currency_data()
+ano_atual = date.today().year
+
+col_top1, col_top2 = st.columns([2, 1])
+
+# COLUNA 1: BOLETIM FOCUS (2025 - Ano Atual)
+with col_top1:
+    if not df_focus.empty:
+        ultima_data = df_focus['data_relatorio'].max()
+        df_last = df_focus[df_focus['data_relatorio'] == ultima_data]
+        df_view = df_last[df_last['ano_referencia'] == ano_atual]
+        df_pivot = df_view.pivot_table(index='Indicador', columns='ano_referencia', values='previsao', aggfunc='mean')
+        
+        st.markdown(f"**Expectativa {ano_atual} (Boletim Focus - {pd.to_datetime(ultima_data).strftime('%d/%m')})**")
+        
+        fc1, fc2, fc3, fc4 = st.columns(4)
+        ipca_f = df_pivot.get(ano_atual, {}).get('IPCA', 0)
+        selic_f = df_pivot.get(ano_atual, {}).get('Selic', 0)
+        pib_f = df_pivot.get(ano_atual, {}).get('PIB Total', 0)
+        cambio_f = df_pivot.get(ano_atual, {}).get('Câmbio', 0)
+        
+        fc1.metric("IPCA (Fim)", f"{ipca_f:.2f}%")
+        fc2.metric("Selic (Fim)", f"{selic_f:.2f}%")
+        fc3.metric("PIB", f"{pib_f:.2f}%")
+        fc4.metric("Dólar (Alvo)", f"R$ {cambio_f:.2f}")
+    else:
+        st.warning("Focus indisponível.")
+
+# COLUNA 2: COTAÇÃO MOEDAS (TEMPO REAL)
+with col_top2:
+    st.markdown("**Câmbio (Tempo Real)**")
+    mc1, mc2 = st.columns(2)
+    
+    if not df_moedas.empty:
+        try:
+            usd_val = float(df_moedas.loc['USDBRL', 'bid'])
+            eur_val = float(df_moedas.loc['EURBRL', 'bid'])
+            usd_var = float(df_moedas.loc['USDBRL', 'pctChange'])
+            eur_var = float(df_moedas.loc['EURBRL', 'pctChange'])
+            
+            mc1.metric("Dólar", f"R$ {usd_val:.2f}", f"{usd_var}%")
+            mc2.metric("Euro", f"R$ {eur_val:.2f}", f"{eur_var}%")
+        except:
+             st.info("Carregando moedas...")
+    else:
+        st.info("API Moedas indisponível.")
 
 st.divider()
 
-# --- ABAS (AGORA COM FOCUS) ---
-tab1, tab2, tab3, tab4 = st.tabs(["📈 Gráfico", "📅 Matriz de Calor", "📋 Histórico", "🔮 Boletim Focus"])
+# ==============================================================================
+# ÁREA INFERIOR: DETALHES DO ÍNDICE SELECIONADO (IPCA, INPC, ETC)
+# ==============================================================================
+
+st.title(f"📊 Detalhes: {tipo_indice.split()[0]}")
+st.markdown(f"**Dados históricos atualizados até:** {df.iloc[0]['data_fmt']}")
+
+kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+kpi1.metric("Taxa do Mês", f"{df.iloc[0]['valor']:.2f}%")
+kpi2.metric("Acumulado 12 Meses", f"{df.iloc[0]['acum_12m']:.2f}%")
+kpi3.metric("Acumulado Ano (YTD)", f"{df.iloc[0]['acum_ano']:.2f}%")
+kpi4.metric("Início da Série", df['ano'].min())
+
+tab1, tab2, tab3 = st.tabs(["📈 Gráfico", "📅 Matriz de Calor", "📋 Tabela Detalhada"])
 
 with tab1:
     df_chart = df.dropna(subset=['acum_12m']).sort_values('data_date')
@@ -236,70 +301,3 @@ with tab2:
 
 with tab3:
     st.dataframe(df[['data_fmt', 'valor', 'acum_ano', 'acum_12m']], use_container_width=True, hide_index=True)
-
-# --- ABA 4: BOLETIM FOCUS (NOVA) ---
-with tab4:
-    st.subheader("Expectativas de Mercado (Boletim Focus - BCB)")
-    st.markdown("Projeções medianas do mercado para o final de cada ano.")
-    
-    df_focus = get_focus_data()
-    
-    if not df_focus.empty:
-        # Pega a data mais recente disponível no relatório
-        ultima_data = df_focus['data_relatorio'].max()
-        df_last = df_focus[df_focus['data_relatorio'] == ultima_data]
-        
-        data_formatada = pd.to_datetime(ultima_data).strftime('%d/%m/%Y')
-        st.info(f"📅 Relatório referente a: **{data_formatada}**")
-
-        # Anos de interesse: Ano Atual e Próximo Ano
-        ano_atual = date.today().year
-        ano_prox = ano_atual + 1
-        
-        # Filtrar apenas indicadores para este ano e o próximo
-        df_view = df_last[df_last['ano_referencia'].isin([ano_atual, ano_prox])].copy()
-        
-        # Pivotar para ficar bonito (Indicadores nas linhas, Anos nas colunas)
-        # pivot_table lida melhor com duplicatas se houver
-        df_pivot = df_view.pivot_table(index='Indicador', columns='ano_referencia', values='previsao', aggfunc='mean')
-        
-        # Exibir como métricas
-        col_a, col_b = st.columns(2)
-        
-        with col_a:
-            st.markdown(f"### 🗓️ Previsão {ano_atual}")
-            c1, c2 = st.columns(2)
-            c3, c4 = st.columns(2)
-            
-            # Tenta buscar os valores com segurança (get)
-            ipca_now = df_pivot.get(ano_atual, {}).get('IPCA', 0)
-            selic_now = df_pivot.get(ano_atual, {}).get('Selic', 0)
-            pib_now = df_pivot.get(ano_atual, {}).get('PIB Total', 0)
-            dolar_now = df_pivot.get(ano_atual, {}).get('Câmbio', 0)
-            
-            c1.metric("IPCA", f"{ipca_now:.2f}%")
-            c2.metric("Selic (Fim)", f"{selic_now:.2f}%")
-            c3.metric("PIB", f"{pib_now:.2f}%")
-            c4.metric("Dólar", f"R$ {dolar_now:.2f}")
-
-        with col_b:
-            st.markdown(f"### 🔭 Previsão {ano_prox}")
-            c5, c6 = st.columns(2)
-            c7, c8 = st.columns(2)
-            
-            ipca_next = df_pivot.get(ano_prox, {}).get('IPCA', 0)
-            selic_next = df_pivot.get(ano_prox, {}).get('Selic', 0)
-            pib_next = df_pivot.get(ano_prox, {}).get('PIB Total', 0)
-            dolar_next = df_pivot.get(ano_prox, {}).get('Câmbio', 0)
-
-            c5.metric("IPCA", f"{ipca_next:.2f}%", delta=f"{ipca_next - ipca_now:.2f}%")
-            c6.metric("Selic", f"{selic_next:.2f}%", delta=f"{selic_next - selic_now:.2f}%")
-            c7.metric("PIB", f"{pib_next:.2f}%", delta=f"{pib_next - pib_now:.2f}%")
-            c8.metric("Dólar", f"R$ {dolar_next:.2f}", delta=f"{dolar_next - dolar_now:.2f}")
-            
-        st.divider()
-        st.markdown("**Tabela Completa (Último Relatório)**")
-        st.dataframe(df_last[['Indicador', 'ano_referencia', 'previsao']].sort_values(['ano_referencia', 'Indicador']), use_container_width=True, hide_index=True)
-        
-    else:
-        st.warning("Não foi possível carregar os dados do Focus no momento.")

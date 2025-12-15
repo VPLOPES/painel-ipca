@@ -134,7 +134,7 @@ with st.spinner(f"Carregando dados do {tipo_indice}..."):
         df = get_sidra_data("1737", "63") # Tabela 1737, Var 63 (IPCA)
         cor_tema = "#003366" # Azul
     elif "INPC" in tipo_indice:
-        df = get_sidra_data("1737", "44") # Tabela 1737, Var 44 (INPC)
+        df = get_sidra_data("1736", "44") # Tabela 1737, Var 44 (INPC)
         cor_tema = "#2E8B57" # Verde SeaGreen
     elif "IGP-M" in tipo_indice:
         df = get_bcb_data("189") # Série 189 do BCB (IGP-M Mensal)

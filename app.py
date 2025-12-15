@@ -98,12 +98,21 @@ def get_currency_realtime():
 @st.cache_data(ttl=86400) # Cache de 24h
 def get_cambio_historico():
     try:
-        # Série 1: Dólar (Venda) | Série 21619: Euro (Venda)
-        url_usd = "http://api.bcb.gov.br/dados/serie/bcdata.sgs.1/dados?formato=json"
-        url_eur = "http://api.bcb.gov.br/dados/serie/bcdata.sgs.21619/dados?formato=json"
+        # O segredo: Fingir ser um navegador (Chrome) para o BCB não bloquear
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'
+        }
         
-        df_usd = pd.read_json(url_usd)
-        df_eur = pd.read_json(url_eur)
+        # URLs (usando HTTPS)
+        url_usd = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.1/dados?formato=json"
+        url_eur = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.21619/dados?formato=json"
+        
+        # Baixando com requests e headers
+        resp_usd = requests.get(url_usd, headers=headers, timeout=10)
+        df_usd = pd.DataFrame(resp_usd.json())
+        
+        resp_eur = requests.get(url_eur, headers=headers, timeout=10)
+        df_eur = pd.DataFrame(resp_eur.json())
         
         # Tratamento USD
         df_usd['data'] = pd.to_datetime(df_usd['data'], format='%d/%m/%Y')
@@ -119,8 +128,12 @@ def get_cambio_historico():
         df_final = df_usd.join(df_eur, how='outer')
         df_final = df_final[df_final.index >= '1994-07-01']
         
+        # Preencher buracos (fins de semana) com o valor anterior para o gráfico não quebrar
+        df_final = df_final.ffill()
+        
         return df_final
-    except:
+    except Exception as e:
+        print(f"Erro ao baixar histórico de câmbio: {e}")
         return pd.DataFrame()
 
 # 6. Processamento Comum

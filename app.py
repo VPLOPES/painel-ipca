@@ -117,21 +117,29 @@ def get_currency_realtime():
 @st.cache_data(ttl=86400)
 def get_cambio_historico():
     try:
-        # Baixa dados desde o início do plano real (1994)
-        # USDBRL=X é o ticker padrão. O Euro começou depois, mas o Yahoo gerencia os nulos.
+        # Baixa dados (progress=False remove a barrinha de carregamento do terminal)
         df = yf.download(["USDBRL=X", "EURBRL=X"], start="1994-07-01", progress=False)
         
-        # O yfinance retorna um MultiIndex nas colunas (Price, Ticker). 
-        # Vamos pegar apenas o 'Close' (Fechamento)
+        # Pega apenas o fechamento
         df = df['Close']
         
-        # Renomeia para ficar bonito no gráfico
-        df = df.rename(columns={'USDBRL=X': 'Dólar', 'EURBRL=X': 'Euro'})
+        # --- CORREÇÃO DE DATA/FUSO ---
+        # Se o índice não tiver fuso (naive), assume UTC e converte para SP
+        if df.index.tz is None:
+            df.index = df.index.tz_localize('UTC')
         
-        # Remove timezone se houver (para evitar erros de plotagem)
+        # Converte para América/Sao_Paulo
+        df.index = df.index.tz_convert('America/Sao_Paulo')
+        
+        # Remove a informação de fuso para não bugar o gráfico, mas mantém a data local correta
         df.index = df.index.tz_localize(None)
         
-        # Preenche dias sem negociação (fins de semana) com o valor anterior
+        # Garante que não tenhamos datas futuras (filtro de segurança)
+        hoje = pd.Timestamp.now().normalize()
+        df = df[df.index <= hoje]
+        # -----------------------------
+
+        df = df.rename(columns={'USDBRL=X': 'Dólar', 'EURBRL=X': 'Euro'})
         df = df.ffill()
         
         return df
@@ -325,45 +333,38 @@ with st.expander("💸 Histórico de Câmbio (Dólar e Euro desde 1994)", expand
         tab_graf, tab_matriz, tab_tabela = st.tabs(["📈 Gráfico", "📅 Matriz de Retornos", "📋 Tabela Diária"])
         
         # === ABA 1: GRÁFICO (Com legenda corrigida) ===
-        with tab_graf:
-            cores_map = {"Dólar": "#00FF7F", "Euro": "#00BFFF"}
-            
-            fig_cambio = px.line(df_cambio, x=df_cambio.index, y=['Dólar', 'Euro'], 
-                                 labels={'value': 'Cotação (R$)', 'variable': 'Moeda', 'data': ''},
-                                 color_discrete_map=cores_map)
-            
-            fig_cambio.update_layout(
-                template="plotly_dark",
-                paper_bgcolor='rgba(0,0,0,0)',
-                plot_bgcolor='rgba(0,0,0,0)',
-                font=dict(color="#E0E0E0"),
-                hovermode="x unified",
-                # CORREÇÃO DA LEGENDA: Centralizada e com fundo para leitura
-                legend=dict(
-                    orientation="h",
-                    y=1.1, x=0.5,
-                    xanchor="center",
-                    bgcolor="rgba(0,0,0,0.5)",
-                    bordercolor="#444",
-                    borderwidth=1
-                ),
-                margin=dict(l=0, r=0, t=40, b=0)
-            )
-            
-            fig_cambio.update_xaxes(
-                showgrid=False, rangeslider_visible=False,
-                rangeselector=dict(
-                    buttons=list([
-                        dict(count=1, label="1A", step="year", stepmode="backward"),
-                        dict(count=5, label="5A", step="year", stepmode="backward"),
-                        dict(step="all", label="Tudo")
-                    ]),
-                    bgcolor="#262730", font=dict(color="white")
-                )
-            )
-            fig_cambio.update_yaxes(showgrid=True, gridcolor='#333333', tickprefix="R$ ")
-            
-            st.plotly_chart(fig_cambio, use_container_width=True)
+@st.cache_data(ttl=86400)
+def get_cambio_historico():
+    try:
+        # Baixa dados (progress=False remove a barrinha de carregamento do terminal)
+        df = yf.download(["USDBRL=X", "EURBRL=X"], start="1994-07-01", progress=False)
+        
+        # Pega apenas o fechamento
+        df = df['Close']
+        
+        # --- CORREÇÃO DE DATA/FUSO ---
+        # Se o índice não tiver fuso (naive), assume UTC e converte para SP
+        if df.index.tz is None:
+            df.index = df.index.tz_localize('UTC')
+        
+        # Converte para América/Sao_Paulo
+        df.index = df.index.tz_convert('America/Sao_Paulo')
+        
+        # Remove a informação de fuso para não bugar o gráfico, mas mantém a data local correta
+        df.index = df.index.tz_localize(None)
+        
+        # Garante que não tenhamos datas futuras (filtro de segurança)
+        hoje = pd.Timestamp.now().normalize()
+        df = df[df.index <= hoje]
+        # -----------------------------
+
+        df = df.rename(columns={'USDBRL=X': 'Dólar', 'EURBRL=X': 'Euro'})
+        df = df.ffill()
+        
+        return df
+    except Exception as e:
+        print(f"Erro Yahoo Finance Histórico: {e}")
+        return pd.DataFrame()
 
         # === ABA 2: MATRIZ DE CALOR (Variação Mensal %) ===
         with tab_matriz:

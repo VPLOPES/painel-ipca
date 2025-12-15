@@ -56,14 +56,28 @@ def get_sidra_data(table_code, variable_code):
 @st.cache_data
 def get_bcb_data(codigo_serie):
     try:
-        url = f"http://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo_serie}/dados?formato=json"
-        df = pd.read_json(url)
+        url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo_serie}/dados?formato=json"
+        
+        # --- A CORREÇÃO MÁGICA ---
+        # Fingimos ser um navegador e ignoramos o erro de certificado SSL do governo
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'
+        }
+        response = requests.get(url, headers=headers, verify=False, timeout=10)
+        response.raise_for_status() # Garante que não foi erro 404 ou 500
+        
+        # Cria o DataFrame a partir do JSON da resposta
+        df = pd.DataFrame(response.json())
+        # -------------------------
+
         df['data_date'] = pd.to_datetime(df['data'], format='%d/%m/%Y')
         df['valor'] = pd.to_numeric(df['valor'])
         df['D2C'] = df['data_date'].dt.strftime('%Y%m')
         df['ano'] = df['data_date'].dt.strftime('%Y')
         return processar_dataframe_comum(df)
-    except:
+    except Exception as e:
+        # Dica: Se quiser debugar, descomente o print abaixo
+        # print(f"Erro BCB {codigo_serie}: {e}")
         return pd.DataFrame()
 
 # 3. Boletim Focus

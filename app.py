@@ -6,6 +6,7 @@ import plotly.express as px
 from datetime import date
 import requests
 import yfinance as yf
+from matplotlib.colors import LinearSegmentedColormap
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(
@@ -32,6 +33,9 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
+cores_leves = ["#FFB3B3", "#FFFFFF", "#B3FFB3"] # Vermelho Suave, Branco, Verde Suave
+cmap_leves = LinearSegmentedColormap.from_list("pastel_rdylgn", cores_leves)
+# -------------------------------------------------------
 
 # --- FUNÇÕES DE CARGA DE DADOS ---
 
@@ -365,9 +369,15 @@ with st.expander("💸 Histórico de Câmbio (Dólar e Euro desde 1994)", expand
                 matrix_cambio = df_retorno.pivot(index='ano', columns='mes', values=moeda_matriz)
                 colunas_ordem = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez']
                 matrix_cambio = matrix_cambio[colunas_ordem].sort_index(ascending=False)
-                st.dataframe(matrix_cambio.style.background_gradient(cmap='RdYlGn', vmin=-5, vmax=5).format("{:.2f}%"), use_container_width=True, height=500)
+                st.dataframe(
+                    # Usamos 'cmap_leves' em vez de 'RdYlGn'
+                    # Mantemos vmin/vmax simétricos para que o 0 fique branco
+                    matrix_cambio.style.background_gradient(cmap=cmap_leves, vmin=-5, vmax=5).format("{:.2f}%"), 
+                    use_container_width=True, 
+                    height=500
+                )
             except Exception as e:
-                st.info(f"Dados insuficientes: {e}")
+                st.info(f"Dados insuficientes para gerar a matriz completa: {e}")
 
         # ABA TABELA (COM DOWNLOAD)
         with tab_tabela:
@@ -432,7 +442,11 @@ with tab2:
         matrix = df.pivot(index='ano', columns='mes_nome', values='valor')
         ordem = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez']
         matrix = matrix[ordem].sort_index(ascending=False)
-        st.dataframe(matrix.style.background_gradient(cmap='RdYlGn_r', axis=None, vmin=-0.1, vmax=1.5).format("{:.2f}"), use_container_width=True, height=500)
+        st.dataframe(
+            matrix.style.background_gradient(cmap=cmap_leves, axis=None, vmin=-1.5, vmax=1.5).format("{:.2f}"), 
+            use_container_width=True, 
+            height=500
+        )
     except:
         st.warning("Matriz indisponível.")
 

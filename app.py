@@ -163,6 +163,55 @@ def processar_dataframe_comum(df):
     df['acum_12m'] = (df['fator'].rolling(window=12).apply(np.prod, raw=True) - 1) * 100
     return df.sort_values('data_date', ascending=False)
 
+# 7. NOVO: Dados Macroeconômicos Reais (SGS - Banco Central)
+@st.cache_data(ttl=3600)
+def get_macro_real():
+    # Dicionário com os códigos do SGS/BCB
+    # PIB: 4380 (Acum 12m R$ mi)
+    # Dívida Líq: 4478 (% PIB)
+    # Primário: 5026 (% PIB Acum 12m)
+    # Nominal: 5030 (% PIB Acum 12m)
+    # Balança: 22709 (Mensal US$ mi) -> Precisa somar 12m
+    # Trans. Correntes: 22708 (Mensal US$ mi) -> Precisa somar 12m
+    # IDP: 22885 (Mensal US$ mi) -> Precisa somar 12m
+    
+    series = {
+        'PIB (R$ Bi)': 4380,
+        'Dívida Líq. (% PIB)': 4478,
+        'Res. Primário (% PIB)': 5026,
+        'Res. Nominal (% PIB)': 5030,
+        'Balança Com. (US$ Mi)': 22709,
+        'Trans. Correntes (US$ Mi)': 22708,
+        'IDP (US$ Mi)': 22885
+    }
+    
+    resultados = {}
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    
+    try:
+        for nome, codigo in series.items():
+            url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo}/dados/ultimos/13?formato=json"
+            resp = requests.get(url, headers=headers, verify=False, timeout=5)
+            df = pd.DataFrame(resp.json())
+            df['valor'] = pd.to_numeric(df['valor'])
+            
+            # Lógica Específica
+            if nome in ['Balança Com. (US$ Mi)', 'Trans. Correntes (US$ Mi)', 'IDP (US$ Mi)']:
+                # Soma os últimos 12 meses para anualizar
+                valor_final = df['valor'].iloc[-12:].sum() / 1000 # Converte para Bilhões
+            elif nome == 'PIB (R$ Bi)':
+                valor_final = df['valor'].iloc[-1] / 1000000 # Converte de Milhões para Trilhões
+            else:
+                # Pegamos o último dado disponível (Dívida, Resultados Fiscais)
+                valor_final = df['valor'].iloc[-1]
+                
+            resultados[nome] = valor_final
+            
+        return resultados
+    except Exception as e:
+        print(f"Erro Macro Real: {e}")
+        return {}
+
 # --- CÁLCULO ---
 def calcular_correcao(df, valor, data_ini_code, data_fim_code):
     is_reverso = data_ini_code > data_fim_code
@@ -348,6 +397,49 @@ with st.expander("🔭 Clique para ver: Expectativas de Mercado (Focus) & Câmbi
                 st.info("Erro moedas")
         else:
             st.info("API indisponível")
+
+# ==============================================================================
+# NOVO BLOCO: CONJUNTURA MACROECONÔMICA (DADOS REAIS)
+# ==============================================================================
+with st.expander("🧩 Conjuntura Macroeconômica (Dados Oficiais Realizados)", expanded=False):
+    st.markdown("Principais indicadores da economia brasileira (Dados mais recentes do Banco Central).")
+    
+    macro_dados = get_macro_real()
+    
+    if macro_dados:
+        # --- LINHA 1: ATIVIDADE E FISCAL ---
+        st.markdown("##### 🏛️ Atividade & Fiscal (Acum. 12 Meses)")
+        c1, c2, c3, c4 = st.columns(4)
+        
+        pib = macro_dados.get('PIB (R$ Bi)', 0)
+        divida = macro_dados.get('Dívida Líq. (% PIB)', 0)
+        primario = macro_dados.get('Res. Primário (% PIB)', 0)
+        nominal = macro_dados.get('Res. Nominal (% PIB)', 0)
+        
+        # Cores condicionais para o Fiscal (Deficit negativo fica vermelho)
+        cor_prim = "normal" if primario >= 0 else "inverse" 
+        
+        c1.metric("PIB (Acum. 12m)", f"R$ {pib:.2f} Tri")
+        c2.metric("Dív. Líquida Setor Púb.", f"{divida:.1f}% PIB")
+        c3.metric("Res. Primário", f"{primario:.2f}% PIB")
+        c4.metric("Res. Nominal", f"{nominal:.2f}% PIB")
+        
+        st.divider()
+        
+        # --- LINHA 2: SETOR EXTERNO ---
+        st.markdown("##### 🚢 Setor Externo (Acum. 12 Meses)")
+        c5, c6, c7 = st.columns(3)
+        
+        balanca = macro_dados.get('Balança Com. (US$ Mi)', 0)
+        trans_corr = macro_dados.get('Trans. Correntes (US$ Mi)', 0)
+        idp = macro_dados.get('IDP (US$ Mi)', 0)
+        
+        c5.metric("Balança Comercial", f"US$ {balanca:.1f} Bi", help="Exportações menos Importações")
+        c6.metric("Transações Correntes", f"US$ {trans_corr:.1f} Bi", help="Saldo de trocas de bens, serviços e rendas com o exterior")
+        c7.metric("Investimento Direto (IDP)", f"US$ {idp:.1f} Bi", help="Entrada líquida de capitais para investimento produtivo")
+        
+    else:
+        st.warning("Não foi possível carregar os dados macroeconômicos do BCB.")
 
 # 2. HISTÓRICO DE CÂMBIO (COMPLETO)
 with st.expander("💸 Histórico de Câmbio (Dólar e Euro desde 1994)", expanded=False):

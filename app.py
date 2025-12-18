@@ -77,10 +77,27 @@ def get_data_update_info(df, source_name):
     else:
         return f"{source_name}: Disponível"
 
+# ADICIONE ESTA FUNÇÃO AQUI - SOMENTE UMA VEZ!
+def format_valor_focus(valor, nome):
+    """Formata valores do Focus para exibição"""
+    if pd.isna(valor):
+        return "-"
+    if 'Câmbio' in nome:
+        return f"R$ {valor:.2f}"
+    elif any(x in nome for x in ['comercial', 'Conta corrente', 'Investimento']):
+        return f"US$ {valor:.2f} B"
+    else:
+        return f"{valor:.2f}%"
+
 # --- FUNÇÕES DE CARGA DE DADOS COM TRATAMENTO DE ERRO MELHORADO ---
 
 @st.cache_data(show_spinner="Carregando dados do IBGE...")
-def get_sidra_data(table_code, variable_code):
+def get_sidra_data(table_code, variable_code, test_mode=False):
+    """Função para obter dados do IBGE com suporte a test_mode"""
+    if test_mode:
+        # Retorna dataframe vazio para teste rápido
+        return pd.DataFrame()
+    
     try:
         with st.spinner(f"Buscando dados do IBGE (Tabela {table_code})..."):
             dados_raw = sidrapy.get_table(
@@ -106,7 +123,12 @@ def get_sidra_data(table_code, variable_code):
         return pd.DataFrame()
 
 @st.cache_data(show_spinner="Carregando dados do BCB...")
-def get_bcb_data(codigo_serie, serie_nome=""):
+def get_bcb_data(codigo_serie, serie_nome="", test_mode=False):
+    """Função para obter dados do BCB com suporte a test_mode"""
+    if test_mode:
+        # Retorna dataframe vazio para teste rápido
+        return pd.DataFrame()
+    
     try:
         url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo_serie}/dados?formato=json"
         
@@ -142,7 +164,12 @@ def get_bcb_data(codigo_serie, serie_nome=""):
         return pd.DataFrame()
 
 @st.cache_data(ttl=3600, show_spinner="Carregando expectativas de mercado...")
-def get_focus_data():
+def get_focus_data(test_mode=False):
+    """Função para obter dados do Focus com suporte a test_mode"""
+    if test_mode:
+        # Retorna dataframe vazio para teste rápido
+        return pd.DataFrame()
+    
     try:
         url = "https://olinda.bcb.gov.br/olinda/servico/Expectativas/versao/v1/odata/ExpectativasMercadoAnuais?$top=5000&$orderby=Data%20desc&$format=json"
         
@@ -192,7 +219,12 @@ def get_focus_data():
         return pd.DataFrame()
 
 @st.cache_data(ttl=300, show_spinner="Atualizando cotações...")
-def get_currency_realtime():
+def get_currency_realtime(test_mode=False):
+    """Função para obter cotações em tempo real com suporte a test_mode"""
+    if test_mode:
+        # Retorna dataframe vazio para teste rápido
+        return pd.DataFrame()
+    
     try:
         tickers = ["USDBRL=X", "EURBRL=X"]
         dados = {}
@@ -222,7 +254,12 @@ def get_currency_realtime():
         return pd.DataFrame()
 
 @st.cache_data(ttl=86400, show_spinner="Carregando histórico de câmbio...")
-def get_cambio_historico():
+def get_cambio_historico(test_mode=False):
+    """Função para obter histórico de câmbio com suporte a test_mode"""
+    if test_mode:
+        # Retorna dataframe vazio para teste rápido
+        return pd.DataFrame()
+    
     try:
         with st.spinner("Baixando histórico de câmbio (pode levar alguns segundos)..."):
             df = yf.download(["USDBRL=X", "EURBRL=X"], start="1994-07-01", progress=False)
@@ -250,7 +287,12 @@ def get_cambio_historico():
         return pd.DataFrame()
 
 @st.cache_data(ttl=3600, show_spinner="Carregando dados macroeconômicos...")
-def get_macro_real():
+def get_macro_real(test_mode=False):
+    """Função para obter dados macroeconômicos com suporte a test_mode"""
+    if test_mode:
+        # Retorna dicionário vazio para teste rápido
+        return {}
+    
     series = {
         'PIB (R$ Bi)': 4382,
         'Dívida Líq. (% PIB)': 4513,
@@ -389,24 +431,47 @@ with st.sidebar.expander("📘 Metodologia", expanded=False):
 
 st.sidebar.divider()
 
-# 🔧 STATUS DAS APIs
+# 🔧 STATUS DAS APIs (ATUALIZADO)
 st.sidebar.subheader("🔧 Status das APIs")
-with st.spinner("Verificando conectividade..."):
-    # Teste rápido das APIs
-    api_tests = {
-        "IBGE": lambda: not get_sidra_data("1737", "63", test_mode=True).empty,
-        "BCB SGS": lambda: not get_bcb_data("4390", test_mode=True).empty,
-        "Focus": lambda: not get_focus_data(test_mode=True).empty,
-        "Câmbio": lambda: not get_currency_realtime(test_mode=True).empty
-    }
+try:
+    # Teste simplificado das APIs
+    api_status = {}
     
-    for api_name, test_func in api_tests.items():
-        try:
-            status = test_func()
-            icon = "🟢" if status else "🔴"
-            st.sidebar.markdown(f"{icon} {api_name}")
-        except:
-            st.sidebar.markdown(f"⚪ {api_name}")
+    # IBGE
+    try:
+        df_test = get_sidra_data("1737", "63", test_mode=False)
+        api_status["IBGE"] = not df_test.empty
+    except:
+        api_status["IBGE"] = False
+    
+    # BCB
+    try:
+        df_test = get_bcb_data("4390", test_mode=False)
+        api_status["BCB"] = not df_test.empty
+    except:
+        api_status["BCB"] = False
+    
+    # Focus
+    try:
+        df_test = get_focus_data(test_mode=False)
+        api_status["Focus"] = not df_test.empty
+    except:
+        api_status["Focus"] = False
+    
+    # Câmbio
+    try:
+        df_test = get_currency_realtime(test_mode=False)
+        api_status["Câmbio"] = not df_test.empty
+    except:
+        api_status["Câmbio"] = False
+    
+    # Exibir status
+    for api_name, status in api_status.items():
+        icon = "🟢" if status else "🔴"
+        st.sidebar.markdown(f"{icon} {api_name}")
+        
+except Exception as e:
+    st.sidebar.info("Status das APIs não disponível")
 
 st.sidebar.divider()
 
@@ -441,11 +506,11 @@ with st.spinner(f"Carregando dados do {tipo_indice.split()[0]}..."):
 if df.empty:
     error_container = st.container()
     with error_container:
-        st.error("""
+        st.error(f"""
         ⚠️ **Erro ao carregar dados do índice principal**
         
         **Fonte:** {fonte}
-        **Índice:** {indice}
+        **Índice:** {tipo_indice.split()[0]}
         
         **Possíveis causas:**
         1. Conexão com {fonte} interrompida
@@ -460,7 +525,7 @@ if df.empty:
         - Use os dados históricos já carregados
         
         **Status atual:** ❌ Indisponível
-        """.format(fonte=fonte, indice=tipo_indice.split()[0]))
+        """)
     
     # Permite continuar com dados limitados
     st.warning("Usando dados limitados. Algumas funcionalidades podem estar indisponíveis.")
@@ -729,7 +794,7 @@ with st.expander("🔭 Expectativas de Mercado (Focus) & Câmbio Hoje", expanded
                     if ordem_final:
                         df_pivot_multi = df_pivot_multi.reindex(ordem_final)
                         
-                        # Formatação
+                        # Formatação - USANDO A FUNÇÃO format_valor_focus QUE JÁ ESTÁ DEFINIDA
                         df_display = df_pivot_multi.copy()
                         for col in df_display.columns:
                             df_display[col] = df_display.apply(
@@ -948,39 +1013,3 @@ st.caption("""
 ⚠️ **Aviso**: As informações fornecidas são para fins educacionais e informativos. 
 Não constituem recomendação de investimento. Consulte um profissional qualificado para decisões financeiras.
 """)
-
-# Função auxiliar para formatação do Focus
-def format_valor_focus(valor, nome):
-    if pd.isna(valor):
-        return "-"
-    if 'Câmbio' in nome:
-        return f"R$ {valor:.2f}"
-    elif any(x in nome for x in ['comercial', 'Conta corrente', 'Investimento']):
-        return f"US$ {valor:.2f} B"
-    else:
-        return f"{valor:.2f}%"
-
-# Versão adaptada para testes
-def get_sidra_data(table_code, variable_code, test_mode=False):
-    if test_mode:
-        # Retorna dataframe vazio para teste rápido
-        return pd.DataFrame()
-    # Implementação real...
-
-def get_bcb_data(codigo_serie, serie_nome="", test_mode=False):
-    if test_mode:
-        # Retorna dataframe vazio para teste rápido
-        return pd.DataFrame()
-    # Implementação real...
-
-def get_focus_data(test_mode=False):
-    if test_mode:
-        # Retorna dataframe vazio para teste rápido
-        return pd.DataFrame()
-    # Implementação real...
-
-def get_currency_realtime(test_mode=False):
-    if test_mode:
-        # Retorna dataframe vazio para teste rápido
-        return pd.DataFrame()
-    # Implementação real...

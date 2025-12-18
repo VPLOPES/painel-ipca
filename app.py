@@ -161,6 +161,48 @@ class StatusFonte:
             {texto}
         </span>
         """
+import json
+import os
+
+class GerenciadorDados:
+    """Gerencia o cache local em disco (Lazy ETL)"""
+    ARQUIVO_CACHE = "vpl_dados_cache.json"
+    TTL_CACHE_DISCO = 12 * 3600  # 12 horas em segundos
+
+    @staticmethod
+    def carregar_do_disco():
+        """Tenta carregar dados do arquivo local"""
+        if not os.path.exists(GerenciadorDados.ARQUIVO_CACHE):
+            return None
+        
+        try:
+            # Verifica se o arquivo é recente
+            tempo_modificacao = os.path.getmtime(GerenciadorDados.ARQUIVO_CACHE)
+            idade_arquivo = time.time() - tempo_modificacao
+            
+            if idade_arquivo > GerenciadorDados.TTL_CACHE_DISCO:
+                logger.info("Cache em disco expirado.")
+                return None
+                
+            logger.info("Carregando dados do disco (Cache Local)...")
+            with open(GerenciadorDados.ARQUIVO_CACHE, 'r') as f:
+                dados_serializados = json.load(f)
+                return dados_serializados
+        except Exception as e:
+            logger.error(f"Erro ao ler cache: {e}")
+            return None
+
+    @staticmethod
+    def salvar_no_disco(dados_dict):
+        """Salva os dados processados no disco para o próximo uso"""
+        try:
+            # Precisamos converter DataFrames para JSON/Dict antes de salvar
+            # Esta é uma simplificação; idealmente serializamos cada objeto
+            with open(GerenciadorDados.ARQUIVO_CACHE, 'w') as f:
+                json.dump(dados_dict, f)
+            logger.info("Dados salvos no cache local com sucesso.")
+        except Exception as e:
+            logger.error(f"Erro ao salvar cache: {e}")
 
 # --- DECORADORES E UTILITÁRIOS ---
 def log_errors(func):
@@ -206,34 +248,38 @@ def verificar_dados(df: pd.DataFrame, nome: str) -> List[str]:
 
 # --- FUNÇÕES DE CARGA DE DADOS COM STATUS ---
 @st.cache_data(ttl=Config.TTL_LONG)
-@log_errors
-def carregar_dados_sidra(codigo_tabela: str, codigo_variavel: str) -> pd.DataFrame:
-    """Carrega dados do SIDRA/IBGE"""
+def carregar_historico_cambio() -> Tuple[pd.DataFrame, str, str]:
+    """Carrega histórico de câmbio (Recriada)"""
     try:
-        dados = sidrapy.get_table(
-            table_code=codigo_tabela,
-            territorial_level="1",
-            ibge_territorial_code="all",
-            variable=codigo_variavel,
-            period="last 360"
-        )
+        # Tenta pegar via Yahoo Finance (dados longos)
+        df = yf.download(["USDBRL=X", "EURBRL=X"], start="2000-01-01", progress=False)
+        if df.empty: raise ValueError("Vazio")
         
-        if dados.empty or len(dados) < 2:
-            return pd.DataFrame()
+        df = df['Close'].copy()
+        df.index = df.index.tz_localize(None) # Remove timezone
+        df = df.rename(columns={'USDBRL=X': 'Dólar', 'EURBRL=X': 'Euro'})
+        df = df.ffill().dropna()
         
-        df = dados.iloc[1:].copy()
-        df.rename(columns={'V': 'valor', 'D2N': 'mes_ano'}, inplace=True)
-        df['valor'] = pd.to_numeric(df['valor'], errors='coerce')
-        df['data_date'] = pd.to_datetime(df['D2C'], format="%Y%m", errors='coerce')
-        df['ano'] = df['D2C'].str.slice(0, 4)
-        
-        # Atualiza status - sempre automático para SIDRA
-        StatusFonte.atualizar('indicador_principal', 'automático', 'IBGE/SIDRA')
-        
-        return processar_dataframe(df)
-    except Exception as e:
-        logger.error(f"Erro SIDRA {codigo_tabela}: {e}")
-        return pd.DataFrame()
+        StatusFonte.atualizar('cambio_historico', 'automático', 'Yahoo Finance')
+        return df, 'automático', 'Yahoo Finance'
+    except:
+        # Fallback simples
+        StatusFonte.atualizar('cambio_historico', 'manual', 'Dados Indisponíveis')
+        return pd.DataFrame(), 'manual', 'Erro na Carga'
+
+def carregar_dados_focus() -> Tuple[pd.DataFrame, str, str]:
+    """Wrapper que decide entre API Otimizada e Fallback"""
+    # 1. Tenta a API Otimizada
+    df_api = carregar_focus_otimizado()
+    
+    if not df_api.empty:
+        StatusFonte.atualizar('focus', 'automático', 'BCB/Olinda (Otimizado)')
+        return df_api, 'automático', 'BCB/Olinda'
+    
+    # 2. Se falhar, usa o fallback manual
+    df_manual = criar_fallback_focus()
+    StatusFonte.atualizar('focus', 'manual', 'Base VPL (Manual)')
+    return df_manual, 'manual', 'Base VPL'
 
 @st.cache_data(ttl=Config.TTL_MEDIUM)
 @log_errors
@@ -374,113 +420,103 @@ def criar_fallback_focus() -> pd.DataFrame:
     return df
 
 @st.cache_data(ttl=Config.TTL_SHORT)
-def carregar_dados_focus() -> Tuple[pd.DataFrame, str, str]:
-    """
-    Carrega dados do Focus com fallback inteligente
-    Retorna: (dataframe, tipo_fonte, descricao_fonte)
-    """
-    # Tenta API primeiro
-    df_api = carregar_focus_api()
-    
-    # Verifica qualidade dos dados da API
-    if not df_api.empty:
-        # Verifica se os dados são recentes (últimos 3 dias)
-        data_maxima = df_api['data_relatorio'].max()
-        if pd.isna(data_maxima):
-            logger.warning("API Focus retornou datas inválidas")
-        elif (datetime.now() - data_maxima).days <= 3:
-            logger.info("Usando dados automáticos do Focus (API)")
-            StatusFonte.atualizar('focus', 'automático', 'BCB/Focus API')
-            return df_api, 'automático', 'BCB/Focus API'
-    
-    # Se API falhou ou dados muito antigos, usa fallback manual
-    logger.warning("Usando dados manuais do Focus (fallback)")
-    df_manual = criar_fallback_focus()
-    StatusFonte.atualizar('focus', 'manual', 'Base VPL Consultoria')
-    return df_manual, 'manual', 'Base VPL Consultoria'
-
-@st.cache_data(ttl=Config.TTL_SHORT)
+def carregar_focus_otimizado() -> pd.DataFrame:
+    """Busca APENAS o último relatório disponível do Focus"""
+    try:
+        # 1. Descobrir qual a data do último relatório disponível
+        url_base = "https://olinda.bcb.gov.br/olinda/servico/Expectativas/versao/v1/odata/ExpectativasMercadoAnuais"
+        
+        # Pega apenas a data mais recente (top=1 ordenado por data desc)
+        query_data = "?$top=1&$select=Data&$orderby=Data desc&$format=json"
+        resp_data = requests.get(url_base + query_data, timeout=5)
+        ultima_data = resp_data.json()['value'][0]['Data']
+        
+        # 2. Baixar apenas os dados dessa data específica
+        # Filtra pela data E pelos indicadores que queremos para economizar banda
+        indicadores_str = "'IPCA','Selic','PIB Total','Câmbio','IGP-M'" # Adicione os outros aqui
+        query_final = (
+            f"?$filter=Data eq '{ultima_data}' and Indicador in ({indicadores_str})"
+            f"&$select=Indicador,DataReferencia,Mediana"
+            f"&$format=json"
+        )
+        
+        response = requests.get(url_base + query_final, timeout=10)
+        dados = response.json()['value']
+        
+        df = pd.DataFrame(dados)
+        
+        # Tratamento (similar ao seu, mas agora o DF é leve)
+        df = df.rename(columns={'DataReferencia': 'ano_referencia', 'Mediana': 'previsao'})
+        df['ano_referencia'] = df['ano_referencia'].astype(int)
+        
+        # Filtra anos futuros relevantes (ex: ano atual + 2)
+        ano_atual = datetime.now().year
+        df = df[df['ano_referencia'].isin([ano_atual, ano_atual + 1, ano_atual + 2])]
+        
+        return df
+        
+    except Exception as e:
+        logger.error(f"Erro Focus Otimizado: {e}")
+        return pd.DataFrame()
+        
+@st.cache_data(ttl=60)
 @log_errors
 def carregar_cotacoes_tempo_real() -> Tuple[pd.DataFrame, str, str]:
-    """Carrega cotações de moedas em tempo real"""
+    """Carrega cotações via AwesomeAPI (Muito mais rápido que Yahoo)"""
+    url = "https://economia.awesomeapi.com.br/last/USD-BRL,EUR-BRL"
     try:
-        dados = {}
-        for ticker in Config.YAHOO_CURRENCIES:
-            ticker_obj = yf.Ticker(ticker)
-            info = ticker_obj.fast_info
-            
-            if info and info.get('last_price'):
-                preco_atual = info['last_price']
-                fechamento_anterior = info.get('previous_close', preco_atual)
-                variacao = ((preco_atual - fechamento_anterior) / fechamento_anterior) * 100
-                
-                moeda = ticker.replace("=X", "")
-                dados[moeda] = {
-                    'cotacao': preco_atual,
-                    'variacao': variacao,
-                    'atualizado': datetime.now().strftime('%H:%M')
-                }
+        response = requests.get(url, timeout=5)
+        response.raise_for_status()
+        data = response.json()
         
-        if dados:
-            df = pd.DataFrame.from_dict(dados, orient='index')
-            df.index.name = 'moeda'
-            StatusFonte.atualizar('cambio_tempo_real', 'automático', 'Yahoo Finance API')
-            return df, 'automático', 'Yahoo Finance API'
-        else:
-            raise ValueError("Nenhum dado retornado")
+        dados_formatados = {}
+        mapa_nomes = {'USDBRL': 'Dólar', 'EURBRL': 'Euro'}
         
-    except Exception as e:
-        logger.error(f"Erro cotações tempo real: {e}")
-        # Fallback manual com valores recentes
-        dados_manual = {
-            'USDBRL': {
-                'cotacao': 5.42,
-                'variacao': 0.15,
-                'atualizado': datetime.now().strftime('%H:%M')
-            },
-            'EURBRL': {
-                'cotacao': 5.85,
-                'variacao': -0.10,
+        for par, info in data.items():
+            nome = mapa_nomes.get(par, par)
+            dados_formatados[nome] = {
+                'cotacao': float(info['bid']),
+                'variacao': float(info['pctChange']),
                 'atualizado': datetime.now().strftime('%H:%M')
             }
-        }
-        df = pd.DataFrame.from_dict(dados_manual, orient='index')
-        StatusFonte.atualizar('cambio_tempo_real', 'manual', 'Base VPL Consultoria')
-        return df, 'manual', 'Base VPL Consultoria'
-
-@st.cache_data(ttl=Config.TTL_LONG)
-@log_errors
-def carregar_historico_cambio() -> Tuple[pd.DataFrame, str, str]:
-    """Carrega histórico completo de câmbio"""
-    try:
-        df = yf.download(Config.YAHOO_CURRENCIES, start="1994-07-01", progress=False)
-        
-        if df.empty:
-            raise ValueError("DataFrame vazio do Yahoo Finance")
-        
-        df = df['Close'].copy()
-        
-        # Correção de fuso horário
-        if df.index.tz is None:
-            df.index = df.index.tz_localize('UTC')
-        df.index = df.index.tz_convert('America/Sao_Paulo')
-        df.index = df.index.tz_localize(None)
-        
-        # Filtra datas futuras
-        hoje = pd.Timestamp.now().normalize()
-        df = df[df.index <= hoje]
-        
-        df = df.rename(columns={'USDBRL=X': 'Dólar', 'EURBRL=X': 'Euro'})
-        df = df.ffill().dropna()
-        
-        StatusFonte.atualizar('cambio_historico', 'automático', 'Yahoo Finance API')
-        return df, 'automático', 'Yahoo Finance API'
+            
+        df = pd.DataFrame.from_dict(dados_formatados, orient='index')
+        StatusFonte.atualizar('cambio_tempo_real', 'automático', 'AwesomeAPI')
+        return df, 'automático', 'AwesomeAPI'
         
     except Exception as e:
-        logger.error(f"Erro histórico câmbio: {e}")
-        # Retorna DataFrame vazio para fallback
-        StatusFonte.atualizar('cambio_historico', 'manual', 'Base VPL Consultoria')
-        return pd.DataFrame(), 'manual', 'Base VPL Consultoria'
+        logger.error(f"Erro AwesomeAPI: {e}")
+        # Fallback manual se a API falhar
+        dados_manual = {
+            'Dólar': {'cotacao': 5.80, 'variacao': 0.0, 'atualizado': 'Manual'},
+            'Euro': {'cotacao': 6.10, 'variacao': 0.0, 'atualizado': 'Manual'}
+        }
+        return pd.DataFrame.from_dict(dados_manual, orient='index'), 'manual', 'Base VPL'
+        
+@st.cache_data(ttl=Config.TTL_LONG)
+def get_sgs_data(codigos: dict, data_inicio: str = '01/01/2000') -> pd.DataFrame:
+    """
+    Busca múltiplas séries do BCB de uma vez.
+    Ex: codigos = {'Selic': 432, 'IPCA': 433}
+    """
+    df_final = pd.DataFrame()
+    
+    for nome, codigo in codigos.items():
+        url = f'http://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo}/dados?formato=json&dataInicial={data_inicio}'
+        try:
+            df = pd.read_json(url)
+            df['data'] = pd.to_datetime(df['data'], dayfirst=True)
+            df = df.set_index('data')
+            df = df.rename(columns={'valor': nome})
+            
+            if df_final.empty:
+                df_final = df
+            else:
+                df_final = df_final.join(df, how='outer')
+        except Exception as e:
+            logger.error(f"Erro ao baixar série {codigo}: {e}")
+            
+    return df_final
 
 @st.cache_data(ttl=Config.TTL_MEDIUM)
 @log_errors
@@ -1447,8 +1483,14 @@ def main():
         tipo_indice, valor_input = criar_sidebar()
         criar_painel_controle_fontes()
     
-    # Carrega dados do indicador selecionado
-    with st.spinner(f"📥 Carregando dados de {tipo_indice}..."):
+    # Variáveis de dados
+    df_indicador = pd.DataFrame()
+    df_focus = pd.DataFrame()
+    
+    # Bloco de Carregamento de Dados
+    with st.spinner(f"📥 Carregando dados de inteligência..."):
+        
+        # A. Carga do Indicador Principal
         mapa_carregamento = {
             "IPCA": lambda: carregar_dados_sidra("1737", "63"),
             "INPC": lambda: carregar_dados_sidra("1736", "44"),
@@ -1463,26 +1505,24 @@ def main():
         if carregador:
             df_indicador = carregador()
             cor_tema = Config.CORES.get(nome_indice, '#FFFFFF')
-        else:
-            st.error("Indicador não suportado")
-            st.stop()
-    
-    if df_indicador.empty:
-        st.error("Não foi possível carregar os dados. Tente novamente.")
-        st.stop()
-    
-    # Carrega dados complementares
-    with st.spinner("🔄 Carregando dados complementares..."):
-        # Carrega dados com informações de fonte
+            
+        # B. Carrega dados complementares (Usando as funções corrigidas)
+        # Otimização: AwesomeAPI é muito rápida, não precisa de cache de disco complexo
         df_focus, tipo_focus, fonte_focus = carregar_dados_focus()
         df_cotacoes, tipo_cambio_real, fonte_cambio_real = carregar_cotacoes_tempo_real()
-        df_cambio_hist, tipo_cambio_hist, fonte_cambio_hist = carregar_historico_cambio()
+        
+        # C. Carrega históricos
         kpis_macro, historico_macro, tipo_macro, fonte_macro = carregar_macro_real()
+        df_cambio_hist, tipo_cambio_hist, fonte_cambio_hist = carregar_historico_cambio()
+    
+    # Verifica se o carregamento principal funcionou
+    if df_indicador.empty:
+        st.error("Não foi possível carregar o indicador principal. Verifique a conexão.")
     
     # Calculadora na sidebar
     criar_calculadora_sidebar(df_indicador, tipo_indice, valor_input)
     
-    # Painéis de dados com indicadores de fonte
+    # Painéis de dados
     criar_painel_focus(df_focus, tipo_focus, fonte_focus, df_cotacoes, tipo_cambio_real, fonte_cambio_real)
     criar_painel_macro(kpis_macro, historico_macro, tipo_macro, fonte_macro)
     criar_painel_cambio(df_cambio_hist, tipo_cambio_hist, fonte_cambio_hist)
@@ -1490,39 +1530,19 @@ def main():
     # Painel principal
     criar_painel_principal(df_indicador, tipo_indice, cor_tema)
     
-    # Footer com status completo
+    # Footer
     criar_footer()
     
-    # CSS customizado
+    # Estilos CSS
     st.markdown("""
     <style>
-        /* Badges de fonte */
-        .stBadge {
-            background-color: #4CAF50;
-            color: white;
-            padding: 2px 8px;
-            border-radius: 12px;
-            font-size: 0.8em;
-            font-weight: bold;
-        }
-        
-        /* Cards para moedas */
-        div[data-testid="stVerticalBlock"] > div[style*="border-left"] {
-            transition: all 0.3s ease;
-        }
-        
-        div[data-testid="stVerticalBlock"] > div[style*="border-left"]:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-        }
-        
-        /* Tabela de status */
-        .dataframe td {
-            font-size: 0.9em !important;
-        }
+        .stBadge { background-color: #4CAF50; color: white; padding: 2px 8px; border-radius: 12px; font-size: 0.8em; font-weight: bold; }
+        div[data-testid="stVerticalBlock"] > div[style*="border-left"] { transition: all 0.3s ease; }
+        div[data-testid="stVerticalBlock"] > div[style*="border-left"]:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+        .dataframe td { font-size: 0.9em !important; }
     </style>
     """, unsafe_allow_html=True)
-
+    
 # --- EXECUÇÃO ---
 if __name__ == "__main__":
     main()

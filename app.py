@@ -7,6 +7,10 @@ from datetime import date
 import requests
 import yfinance as yf
 from matplotlib.colors import LinearSegmentedColormap
+import urllib3
+
+# Desabilita avisos de SSL (Necessário para APIs do Governo)
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(
@@ -33,9 +37,9 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
+
 cores_leves = ["#FFB3B3", "#FFFFFF", "#B3FFB3"] # Vermelho Suave, Branco, Verde Suave
 cmap_leves = LinearSegmentedColormap.from_list("pastel_rdylgn", cores_leves)
-# -------------------------------------------------------
 
 # --- FUNÇÕES DE CARGA DE DADOS ---
 
@@ -47,10 +51,12 @@ def get_sidra_data(table_code, variable_code):
             table_code=table_code, territorial_level="1", ibge_territorial_code="all", 
             variable=variable_code, period="last 360"
         )
+        if dados_raw.empty: return pd.DataFrame()
+        
         df = dados_raw.iloc[1:].copy()
         df.rename(columns={'V': 'valor', 'D2N': 'mes_ano'}, inplace=True)
-        df['valor'] = pd.to_numeric(df['valor'])
-        df['data_date'] = pd.to_datetime(df['D2C'], format="%Y%m")
+        df['valor'] = pd.to_numeric(df['valor'], errors='coerce')
+        df['data_date'] = pd.to_datetime(df['D2C'], format="%Y%m", errors='coerce')
         df['ano'] = df['D2C'].str.slice(0, 4)
         return processar_dataframe_comum(df)
     except Exception as e:
@@ -62,38 +68,34 @@ def get_bcb_data(codigo_serie):
     try:
         url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo_serie}/dados?formato=json"
         
-        # --- A CORREÇÃO MÁGICA ---
-        # Fingimos ser um navegador e ignoramos o erro de certificado SSL do governo
+        # Headers e Verify=False para evitar erros de conexão com o Governo
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'
         }
         response = requests.get(url, headers=headers, verify=False, timeout=10)
-        response.raise_for_status() # Garante que não foi erro 404 ou 500
+        response.raise_for_status()
         
-        # Cria o DataFrame a partir do JSON da resposta
         df = pd.DataFrame(response.json())
-        # -------------------------
-
-        df['data_date'] = pd.to_datetime(df['data'], format='%d/%m/%Y')
-        df['valor'] = pd.to_numeric(df['valor'])
+        df['data_date'] = pd.to_datetime(df['data'], format='%d/%m/%Y', errors='coerce')
+        df['valor'] = pd.to_numeric(df['valor'], errors='coerce')
         df['D2C'] = df['data_date'].dt.strftime('%Y%m')
         df['ano'] = df['data_date'].dt.strftime('%Y')
         return processar_dataframe_comum(df)
     except Exception as e:
-        # Dica: Se quiser debugar, descomente o print abaixo
-        # print(f"Erro BCB {codigo_serie}: {e}")
         return pd.DataFrame()
 
-# 3. Boletim Focus (Expandido com Fiscal e Externo)
+# 3. Boletim Focus (CORRIGIDO)
 @st.cache_data(ttl=3600)
 def get_focus_data():
     try:
-        url = "https://olinda.bcb.gov.br/olinda/servico/Expectativas/versao/v1/odata/ExpectativasMercadoAnuais?$top=1000&$orderby=Data%20desc&$format=json"
-        response = requests.get(url)
+        # Aumentamos o TOP para garantir que pegamos o histórico recente de todos os indicadores
+        url = "https://olinda.bcb.gov.br/olinda/servico/Expectativas/versao/v1/odata/ExpectativasMercadoAnuais?$top=5000&$orderby=Data%20desc&$format=json"
+        
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(url, headers=headers, verify=False, timeout=10)
         data_json = response.json()
         df = pd.DataFrame(data_json['value'])
         
-        # Lista expandida com os novos indicadores
         indicadores = [
             'IPCA', 'PIB Total', 'Selic', 'Câmbio', 'IGP-M',
             'IPCA Administrados', 'Conta corrente', 'Balança comercial',
@@ -103,13 +105,24 @@ def get_focus_data():
         
         df = df[df['Indicador'].isin(indicadores)]
         df = df.rename(columns={'Data': 'data_relatorio', 'DataReferencia': 'ano_referencia', 'Mediana': 'previsao'})
-        df['ano_referencia'] = df['ano_referencia'].astype(int)
+        
+        # Tipagem correta
+        df['ano_referencia'] = pd.to_numeric(df['ano_referencia'], errors='coerce')
+        df['previsao'] = pd.to_numeric(df['previsao'], errors='coerce')
         df['data_relatorio'] = pd.to_datetime(df['data_relatorio'])
+        
+        # --- A CORREÇÃO PRINCIPAL ---
+        # Ordena da data mais recente para a mais antiga
+        df = df.sort_values('data_relatorio', ascending=False)
+        # Remove duplicatas mantendo apenas a PRIMEIRA ocorrência (a mais recente)
+        # Isso evita misturar a previsão de hoje com a de ontem
+        df = df.drop_duplicates(subset=['Indicador', 'ano_referencia'], keep='first')
+        
         return df
-    except:
+    except Exception as e:
         return pd.DataFrame()
 
-# 4. Cotação de Moedas (Tempo Real - Via Yahoo Finance)
+# 4. Cotação de Moedas (Tempo Real)
 @st.cache_data(ttl=300)
 def get_currency_realtime():
     try:
@@ -117,8 +130,9 @@ def get_currency_realtime():
         dados = {}
         for t in tickers:
             ticker_obj = yf.Ticker(t)
-            preco_atual = ticker_obj.fast_info['last_price']
-            fechamento_anterior = ticker_obj.fast_info['previous_close']
+            info = ticker_obj.fast_info
+            preco_atual = info['last_price']
+            fechamento_anterior = info['previous_close']
             variacao = ((preco_atual - fechamento_anterior) / fechamento_anterior) * 100
             key = t.replace("=X", "") 
             dados[key] = {'bid': preco_atual, 'pctChange': variacao}
@@ -127,14 +141,14 @@ def get_currency_realtime():
     except Exception as e:
         return pd.DataFrame()
 
-# 5. Histórico de Câmbio (Via Yahoo Finance - Com Correção de Fuso)
+# 5. Histórico de Câmbio
 @st.cache_data(ttl=86400)
 def get_cambio_historico():
     try:
         df = yf.download(["USDBRL=X", "EURBRL=X"], start="1994-07-01", progress=False)
-        df = df['Close']
+        if df.empty: return pd.DataFrame()
         
-        # --- CORREÇÃO DE DATA/FUSO ---
+        df = df['Close']
         if df.index.tz is None:
             df.index = df.index.tz_localize('UTC')
         df.index = df.index.tz_convert('America/Sao_Paulo')
@@ -142,8 +156,7 @@ def get_cambio_historico():
         
         hoje = pd.Timestamp.now().normalize()
         df = df[df.index <= hoje]
-        # -----------------------------
-
+        
         df = df.rename(columns={'USDBRL=X': 'Dólar', 'EURBRL=X': 'Euro'})
         df = df.ffill()
         return df
@@ -152,6 +165,7 @@ def get_cambio_historico():
 
 # 6. Processamento Comum
 def processar_dataframe_comum(df):
+    if df.empty: return df
     df = df.sort_values('data_date', ascending=True)
     df['mes_num'] = df['data_date'].dt.month
     meses_map = {1: 'Jan', 2: 'Fev', 3: 'Mar', 4: 'Abr', 5: 'Mai', 6: 'Jun',
@@ -160,21 +174,12 @@ def processar_dataframe_comum(df):
     df['data_fmt'] = df['mes_nome'] + '/' + df['ano']
     df['fator'] = 1 + (df['valor'] / 100)
     df['acum_ano'] = (df.groupby('ano')['fator'].cumprod() - 1) * 100
-    df['acum_12m'] = (df['fator'].rolling(window=12).apply(np.prod, raw=True) - 1) * 100
+    df['acum_12m'] = (df['fator'].rolling(window=12, min_periods=12).apply(np.prod, raw=True) - 1) * 100
     return df.sort_values('data_date', ascending=False)
 
-# 7. NOVO: Dados Macroeconômicos Reais (SGS - Banco Central) - CORRIGIDO
+# 7. Dados Macroeconômicos Reais (SGS)
 @st.cache_data(ttl=3600)
 def get_macro_real():
-    # NOVOS CÓDIGOS CORRETOS:
-    # PIB: 4382 (PIB Acumulado 12 meses - R$ milhões)
-    # Dívida Líq: 4513 (DLSP % PIB)
-    # Primário: 5362 (NFSP Primário % PIB - Acum 12m). Nota: Positivo é Deficit.
-    # Nominal: 5360 (NFSP Nominal % PIB - Acum 12m). Nota: Positivo é Deficit.
-    # Balança: 22707 (Saldo Comercial - US$ Milhões)
-    # Trans. Correntes: 22724 (Saldo Trans. Correntes - US$ Milhões)
-    # IDP: 22885 (IDP Ingresso Líquido - US$ Milhões)
-    
     series = {
         'PIB (R$ Bi)': 4382,
         'Dívida Líq. (% PIB)': 4513,
@@ -190,34 +195,26 @@ def get_macro_real():
     
     try:
         for nome, codigo in series.items():
-            # Baixa os últimos 13 meses para garantir janela de 1 ano
             url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo}/dados/ultimos/13?formato=json"
             resp = requests.get(url, headers=headers, verify=False, timeout=5)
             df = pd.DataFrame(resp.json())
             df['valor'] = pd.to_numeric(df['valor'])
             
+            if df.empty: continue
+            
             if nome == 'PIB (R$ Bi)':
-                # Pega o último valor acumulado e converte para Trilhões
                 valor_final = df['valor'].iloc[-1] / 1_000_000 
-                
             elif 'Balança' in nome or 'Trans.' in nome or 'IDP' in nome:
-                # Setor Externo: Soma os últimos 12 meses (Fluxo Anual)
-                # Converte de Milhões para Bilhões
                 valor_final = df['valor'].iloc[-12:].sum() / 1_000
-                
             elif 'Primário' in nome or 'Nominal' in nome:
-                # Fiscal: Inverte o sinal (BC divulga NFSP onde + é déficit. Queremos Resultado onde + é superávit)
                 valor_final = df['valor'].iloc[-1] * -1
-                
             else:
-                # Dívida (já está em % e é estoque, pega o último)
                 valor_final = df['valor'].iloc[-1]
-                
+            
             resultados[nome] = valor_final
             
         return resultados
     except Exception as e:
-        # print(f"Erro Macro Real: {e}")
         return {}
 
 # --- CÁLCULO ---
@@ -244,7 +241,6 @@ def calcular_correcao(df, valor, data_ini_code, data_fim_code):
 # ==============================================================================
 # LAYOUT - SIDEBAR
 # ==============================================================================
-# Tenta carregar logo, se não existir, segue sem
 try:
     st.sidebar.image("Logo_VPL_Consultoria_Financeira.png", use_container_width=True)
 except:
@@ -260,22 +256,22 @@ tipo_indice = st.sidebar.selectbox(
 with st.spinner(f"Carregando dados..."):
     if "IPCA" in tipo_indice:
         df = get_sidra_data("1737", "63")
-        cor_tema = "#00BFFF" # Azul Neon (Ajustado para Dark)
+        cor_tema = "#00BFFF" 
     elif "INPC" in tipo_indice:
         df = get_sidra_data("1736", "44")
-        cor_tema = "#00FF7F" # Verde Neon
+        cor_tema = "#00FF7F" 
     elif "IGP-M" in tipo_indice:
         df = get_bcb_data("189")
-        cor_tema = "#FF6347" # Vermelho Tomate (Mais visível no escuro)
+        cor_tema = "#FF6347" 
     elif "SELIC" in tipo_indice:
         df = get_bcb_data("4390")
-        cor_tema = "#FFD700" # Dourado
+        cor_tema = "#FFD700" 
     elif "CDI" in tipo_indice:
         df = get_bcb_data("4391")
-        cor_tema = "#FFFFFF" # Branco
+        cor_tema = "#FFFFFF" 
 
 if df.empty:
-    st.error("Erro ao carregar dados.")
+    st.error("Erro ao carregar dados. Verifique a conexão com o BCB/IBGE.")
     st.stop()
 
 # --- CALCULADORA ---
@@ -313,14 +309,13 @@ if st.sidebar.button("Calcular", type="primary"):
         st.sidebar.markdown(f"<small>{texto_op}</small>", unsafe_allow_html=True)
         st.sidebar.markdown(f"<h2 style='color: {cor_tema}; margin:0;'>R$ {res['valor_final']:,.2f}</h2>", unsafe_allow_html=True)
         st.sidebar.markdown(f"Total Período: **{res['percentual']:.2f}%**")
-        # MELHORIA: EXIBIR FATOR
         st.sidebar.markdown(f"Fator de Correção: **{res['fator']:.6f}**")
 
 # ==============================================================================
-# ÁREA SUPERIOR: EXPANDERS
+# PAINEL PRINCIPAL
 # ==============================================================================
 
-# 1. BOLETIM FOCUS (COM NOVOS INDICADORES MACRO)
+# FOCUS
 with st.expander("🔭 Clique para ver: Expectativas de Mercado (Focus) & Câmbio Hoje", expanded=False):
     col_top1, col_top2 = st.columns([2, 1])
     
@@ -330,67 +325,57 @@ with st.expander("🔭 Clique para ver: Expectativas de Mercado (Focus) & Câmbi
     
     with col_top1:
         if not df_focus.empty:
+            # Pega a data mais recente disponível no dataframe filtrado
             ultima_data = df_focus['data_relatorio'].max()
-            df_last = df_focus[df_focus['data_relatorio'] == ultima_data]
-            
             data_str = pd.to_datetime(ultima_data).strftime('%d/%m/%Y')
             st.markdown(f"**Boletim Focus ({data_str})**")
             
-            # --- DESTAQUES (Mantivemos os 4 principais no topo) ---
-            df_atual = df_last[df_last['ano_referencia'] == ano_atual]
-            pivot_atual = df_atual.pivot_table(index='Indicador', values='previsao', aggfunc='mean')
+            # --- DESTAQUES ---
+            df_atual = df_focus[df_focus['ano_referencia'] == ano_atual]
+            pivot_atual = df_atual.pivot_table(index='Indicador', values='previsao', aggfunc='first')
             
             fc1, fc2, fc3, fc4 = st.columns(4)
-            # Função auxiliar segura para pegar valor
-            def get_val(idx): return pivot_atual.loc[idx, 'previsao'] if idx in pivot_atual.index else 0
+            def get_val(idx): 
+                try: return pivot_atual.loc[idx, 'previsao']
+                except: return 0
             
             fc1.metric(f"IPCA {ano_atual}", f"{get_val('IPCA'):.2f}%")
             fc2.metric(f"Selic {ano_atual}", f"{get_val('Selic'):.2f}%")
             fc3.metric(f"PIB {ano_atual}", f"{get_val('PIB Total'):.2f}%")
             fc4.metric(f"Dólar {ano_atual}", f"R$ {get_val('Câmbio'):.2f}")
             
-            # --- TABELA COMPLETA (Setor Externo e Fiscal) ---
             st.divider()
             st.markdown("###### 📅 Projeções Macroeconômicas (2025 - 2027)")
             
             anos_exibir = [ano_atual, ano_atual + 1, ano_atual + 2]
-            df_table = df_last[df_last['ano_referencia'].isin(anos_exibir)].copy()
-            df_pivot_multi = df_table.pivot_table(index='Indicador', columns='ano_referencia', values='previsao')
+            df_table = df_focus[df_focus['ano_referencia'].isin(anos_exibir)].copy()
+            df_pivot_multi = df_table.pivot_table(index='Indicador', columns='ano_referencia', values='previsao', aggfunc='first')
             
-            # Ordem lógica de exibição
             ordem = [
-                'IPCA', 'IGP-M', 'IPCA Administrados', 'Selic', 'Câmbio', 'PIB Total', # Atividade/Inflação
-                'Dívida líquida do setor público', 'Resultado primário', 'Resultado nominal', # Fiscal
-                'Balança comercial', 'Conta corrente', 'Investimento direto no país' # Externo
+                'IPCA', 'IGP-M', 'IPCA Administrados', 'Selic', 'Câmbio', 'PIB Total', 
+                'Dívida líquida do setor público', 'Resultado primário', 'Resultado nominal', 
+                'Balança comercial', 'Conta corrente', 'Investimento direto no país' 
             ]
-            # Filtra apenas os que existem na resposta para evitar erro
             ordem_final = [x for x in ordem if x in df_pivot_multi.index]
             df_pivot_multi = df_pivot_multi.reindex(ordem_final)
             
-            # --- FORMATAÇÃO INTELIGENTE (US$, R$ e %) ---
+            # Formatação
             df_display = df_pivot_multi.copy()
-            
             for col in df_display.columns:
                 def formatador_inteligente(row):
                     val = row[col]
                     nome = row.name
                     if pd.isna(val): return "-"
-                    
-                    if 'Câmbio' in nome:
-                        return f"R$ {val:.2f}"
-                    elif any(x in nome for x in ['comercial', 'Conta corrente', 'Investimento']):
-                        return f"US$ {val:.2f} B" # Bilhões de Dólares
-                    else:
-                        return f"{val:.2f}%" # O resto é tudo % (PIB, Dívida, Inflação)
-
+                    if 'Câmbio' in nome: return f"R$ {val:.2f}"
+                    elif any(x in nome for x in ['comercial', 'Conta corrente', 'Investimento']): return f"US$ {val:.2f} B"
+                    else: return f"{val:.2f}%"
                 df_display[col] = df_display.apply(formatador_inteligente, axis=1)
             
             st.dataframe(df_display, use_container_width=True)
-
         else:
-            st.warning("Focus indisponível.")
+            st.warning("Focus indisponível (Erro na API ou Filtro).")
 
-    # MOEDAS (Mantém igual)
+    # MOEDAS
     df_moedas = get_currency_realtime()
     with col_top2:
         st.markdown("**Câmbio (Agora)**")
@@ -401,206 +386,97 @@ with st.expander("🔭 Clique para ver: Expectativas de Mercado (Focus) & Câmbi
                 eur = df_moedas.loc['EURBRL']
                 mc1.metric("Dólar", f"R$ {float(usd['bid']):.2f}", f"{float(usd['pctChange']):.2f}%")
                 mc2.metric("Euro", f"R$ {float(eur['bid']):.2f}", f"{float(eur['pctChange']):.2f}%")
-            except:
-                st.info("Erro moedas")
-        else:
-            st.info("API indisponível")
+            except: st.info("Erro moedas")
+        else: st.info("API indisponível")
 
-# ==============================================================================
-# NOVO BLOCO: CONJUNTURA MACROECONÔMICA (DADOS REAIS)
-# ==============================================================================
+# CONJUNTURA MACRO
 with st.expander("🧩 Conjuntura Macroeconômica (Dados Oficiais Realizados)", expanded=False):
-    st.markdown("Principais indicadores da economia brasileira (Dados mais recentes do Banco Central).")
-    
     macro_dados = get_macro_real()
-    
     if macro_dados:
-        # --- LINHA 1: ATIVIDADE E FISCAL ---
         st.markdown("##### 🏛️ Atividade & Fiscal (Acum. 12 Meses)")
         c1, c2, c3, c4 = st.columns(4)
-        
-        pib = macro_dados.get('PIB (R$ Bi)', 0)
-        divida = macro_dados.get('Dívida Líq. (% PIB)', 0)
-        primario = macro_dados.get('Res. Primário (% PIB)', 0)
-        nominal = macro_dados.get('Res. Nominal (% PIB)', 0)
-        
-        # Cores condicionais para o Fiscal (Deficit negativo fica vermelho)
-        cor_prim = "normal" if primario >= 0 else "inverse" 
-        
-        c1.metric("PIB (Acum. 12m)", f"R$ {pib:.2f} Tri")
-        c2.metric("Dív. Líquida Setor Púb.", f"{divida:.1f}% PIB")
-        c3.metric("Res. Primário", f"{primario:.2f}% PIB")
-        c4.metric("Res. Nominal", f"{nominal:.2f}% PIB")
+        c1.metric("PIB (Acum. 12m)", f"R$ {macro_dados.get('PIB (R$ Bi)', 0):.2f} Tri")
+        c2.metric("Dív. Líquida Setor Púb.", f"{macro_dados.get('Dívida Líq. (% PIB)', 0):.1f}% PIB")
+        c3.metric("Res. Primário", f"{macro_dados.get('Res. Primário (% PIB)', 0):.2f}% PIB")
+        c4.metric("Res. Nominal", f"{macro_dados.get('Res. Nominal (% PIB)', 0):.2f}% PIB")
         
         st.divider()
-        
-        # --- LINHA 2: SETOR EXTERNO ---
         st.markdown("##### 🚢 Setor Externo (Acum. 12 Meses)")
         c5, c6, c7 = st.columns(3)
-        
-        balanca = macro_dados.get('Balança Com. (US$ Mi)', 0)
-        trans_corr = macro_dados.get('Trans. Correntes (US$ Mi)', 0)
-        idp = macro_dados.get('IDP (US$ Mi)', 0)
-        
-        c5.metric("Balança Comercial", f"US$ {balanca:.1f} Bi", help="Exportações menos Importações")
-        c6.metric("Transações Correntes", f"US$ {trans_corr:.1f} Bi", help="Saldo de trocas de bens, serviços e rendas com o exterior")
-        c7.metric("Investimento Direto (IDP)", f"US$ {idp:.1f} Bi", help="Entrada líquida de capitais para investimento produtivo")
-        
+        c5.metric("Balança Comercial", f"US$ {macro_dados.get('Balança Com. (US$ Mi)', 0):.1f} Bi")
+        c6.metric("Transações Correntes", f"US$ {macro_dados.get('Trans. Correntes (US$ Mi)', 0):.1f} Bi")
+        c7.metric("Investimento Direto (IDP)", f"US$ {macro_dados.get('IDP (US$ Mi)', 0):.1f} Bi")
     else:
         st.warning("Não foi possível carregar os dados macroeconômicos do BCB.")
 
-# 2. HISTÓRICO DE CÂMBIO (COMPLETO)
+# CÂMBIO HISTÓRICO
 with st.expander("💸 Histórico de Câmbio (Dólar e Euro desde 1994)", expanded=False):
-    st.markdown("Evolução das moedas frente ao Real (R$) desde o início do Plano Real.")
-    
-    # Carrega dados diários
     df_cambio = get_cambio_historico()
-    
     if not df_cambio.empty:
-        # --- 1. RESUMO DO TOPO ---
-        ultimo_dado = df_cambio.iloc[-1]
-        penultimo_dado = df_cambio.iloc[-2]
-        data_atual = df_cambio.index[-1].strftime('%d/%m/%Y')
-        
-        st.markdown(f"**Fechamento: {data_atual}**")
-        col_res1, col_res2, col_res3 = st.columns([1,1,2])
-        
-        usd_val = ultimo_dado['Dólar']
-        usd_var = ((usd_val - penultimo_dado['Dólar']) / penultimo_dado['Dólar']) * 100
-        
-        eur_val = ultimo_dado['Euro']
-        eur_var = ((eur_val - penultimo_dado['Euro']) / penultimo_dado['Euro']) * 100
-        
-        col_res1.metric("Dólar", f"R$ {usd_val:.2f}", f"{usd_var:.2f}%")
-        col_res2.metric("Euro", f"R$ {eur_val:.2f}", f"{eur_var:.2f}%")
-        
-        st.divider()
-
-        # --- 2. ABAS ---
+        st.markdown(f"**Fechamento: {df_cambio.index[-1].strftime('%d/%m/%Y')}**")
         tab_graf, tab_matriz, tab_tabela = st.tabs(["📈 Gráfico", "📅 Matriz de Retornos", "📋 Tabela Diária"])
         
-        # ABA GRÁFICO
         with tab_graf:
-            cores_map = {"Dólar": "#00FF7F", "Euro": "#00BFFF"}
             fig_cambio = px.line(df_cambio, x=df_cambio.index, y=['Dólar', 'Euro'], 
-                                 labels={'value': 'Cotação (R$)', 'variable': 'Moeda', 'data': ''},
-                                 color_discrete_map=cores_map)
-            fig_cambio.update_layout(
-                template="plotly_dark",
-                paper_bgcolor='rgba(0,0,0,0)',
-                plot_bgcolor='rgba(0,0,0,0)',
-                font=dict(color="#E0E0E0"),
-                hovermode="x unified",
-                legend=dict(orientation="h", y=1.1, x=0.5, xanchor="center", bgcolor="rgba(0,0,0,0)"),
-                margin=dict(l=0, r=0, t=40, b=0)
-            )
-            fig_cambio.update_xaxes(showgrid=False, rangeslider_visible=False)
-            fig_cambio.update_yaxes(showgrid=True, gridcolor='#333333', tickprefix="R$ ")
+                                 color_discrete_map={"Dólar": "#00FF7F", "Euro": "#00BFFF"})
+            fig_cambio.update_layout(template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+                                     font=dict(color="#E0E0E0"), hovermode="x unified", margin=dict(l=0, r=0, t=40, b=0))
             st.plotly_chart(fig_cambio, use_container_width=True)
-
-        # ABA MATRIZ
-        with tab_matriz:
-            st.caption("A matriz mostra a variação percentual (%) mês a mês.")
-            moeda_matriz = st.radio("Selecione a Moeda:", ["Dólar", "Euro"], horizontal=True)
             
+        with tab_matriz:
+            moeda_matriz = st.radio("Selecione a Moeda:", ["Dólar", "Euro"], horizontal=True)
             df_mensal = df_cambio[[moeda_matriz]].resample('ME').last()
             df_retorno = df_mensal.pct_change() * 100
             df_retorno['ano'] = df_retorno.index.year
             df_retorno['mes'] = df_retorno.index.month_name().str.slice(0, 3)
-            
             mapa_meses_en_pt = {'Jan': 'Jan', 'Feb': 'Fev', 'Mar': 'Mar', 'Apr': 'Abr', 'May': 'Mai', 'Jun': 'Jun',
                                 'Jul': 'Jul', 'Aug': 'Ago', 'Sep': 'Set', 'Oct': 'Out', 'Nov': 'Nov', 'Dec': 'Dez'}
             df_retorno['mes'] = df_retorno['mes'].map(mapa_meses_en_pt)
-            
             try:
                 matrix_cambio = df_retorno.pivot(index='ano', columns='mes', values=moeda_matriz)
                 colunas_ordem = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez']
                 matrix_cambio = matrix_cambio[colunas_ordem].sort_index(ascending=False)
-                st.dataframe(
-                    # Usamos 'cmap_leves' em vez de 'RdYlGn'
-                    # Mantemos vmin/vmax simétricos para que o 0 fique branco
-                    matrix_cambio.style.background_gradient(cmap=cmap_leves, vmin=-5, vmax=5).format("{:.2f}%"), 
-                    use_container_width=True, 
-                    height=500
-                )
-            except Exception as e:
-                st.info(f"Dados insuficientes para gerar a matriz completa: {e}")
-
-        # ABA TABELA (COM DOWNLOAD)
+                st.dataframe(matrix_cambio.style.background_gradient(cmap=cmap_leves, vmin=-5, vmax=5).format("{:.2f}%"), use_container_width=True, height=500)
+            except: st.info("Matriz incompleta.")
+            
         with tab_tabela:
-            df_view = df_cambio.sort_index(ascending=False).copy()
-            df_view.index.name = "Data"
-            df_view = df_view.reset_index()
-            df_view['Data'] = df_view['Data'].dt.strftime('%d/%m/%Y')
-            
-            # Botão Download
-            csv_cambio = df_view.to_csv(index=False).encode('utf-8')
-            st.download_button("📥 Baixar dados em CSV", csv_cambio, "cambio_historico.csv", "text/csv")
-            
-            st.dataframe(df_view, use_container_width=True, hide_index=True,
-                         column_config={"Dólar": st.column_config.NumberColumn(format="R$ %.4f"), "Euro": st.column_config.NumberColumn(format="R$ %.4f")})
-
+            df_view = df_cambio.sort_index(ascending=False).reset_index()
+            df_view['Date'] = df_view['Date'].dt.strftime('%d/%m/%Y')
+            st.dataframe(df_view, use_container_width=True, hide_index=True)
     else:
-        st.warning("Não foi possível carregar o histórico do Yahoo Finance.")
+        st.warning("Yahoo Finance indisponível.")
 
-# ==============================================================================
-# ÁREA PRINCIPAL: DETALHES DO ÍNDICE
-# ==============================================================================
-
+# PAINEL DO ÍNDICE PRINCIPAL
 st.title(f"📊 Painel: {tipo_indice.split()[0]}")
-st.markdown(f"**Dados históricos atualizados até:** {df.iloc[0]['data_fmt']}")
+if not df.empty:
+    st.markdown(f"**Dados históricos atualizados até:** {df.iloc[0]['data_fmt']}")
+    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+    kpi1.metric("Taxa do Mês", f"{df.iloc[0]['valor']:.2f}%")
+    kpi2.metric("Acumulado 12 Meses", f"{df.iloc[0]['acum_12m']:.2f}%")
+    kpi3.metric("Acumulado Ano (YTD)", f"{df.iloc[0]['acum_ano']:.2f}%")
+    kpi4.metric("Início da Série", df['ano'].min())
 
-kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-kpi1.metric("Taxa do Mês", f"{df.iloc[0]['valor']:.2f}%")
-kpi2.metric("Acumulado 12 Meses", f"{df.iloc[0]['acum_12m']:.2f}%")
-kpi3.metric("Acumulado Ano (YTD)", f"{df.iloc[0]['acum_ano']:.2f}%")
-kpi4.metric("Início da Série", df['ano'].min())
+    tab1, tab2, tab3 = st.tabs(["📈 Gráfico", "📅 Matriz de Calor", "📋 Tabela Detalhada"])
 
-tab1, tab2, tab3 = st.tabs(["📈 Gráfico", "📅 Matriz de Calor", "📋 Tabela Detalhada"])
+    with tab1:
+        df_chart = df.dropna(subset=['acum_12m']).sort_values('data_date')
+        if any(idx in tipo_indice for idx in ["IGP-M", "SELIC", "CDI"]):
+            df_chart = df_chart[df_chart['ano'].astype(int) >= 2000]
+        fig = px.line(df_chart, x='data_date', y='acum_12m', title=f"Histórico 12 Meses - {tipo_indice.split()[0]}")
+        fig.update_traces(line_color=cor_tema, line_width=3)
+        fig.update_layout(template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+                          font=dict(color="#E0E0E0"), hovermode="x unified", margin=dict(l=0, r=0, t=40, b=0))
+        st.plotly_chart(fig, use_container_width=True)
 
-# GRÁFICO PRINCIPAL (ESTILIZADO)
-with tab1:
-    df_chart = df.dropna(subset=['acum_12m']).sort_values('data_date')
-    indices_volateis = ["IGP-M", "SELIC", "CDI"]
-    eh_volatil = any(idx in tipo_indice for idx in indices_volateis)
-    if eh_volatil:
-        df_chart = df_chart[df_chart['ano'].astype(int) >= 2000]
-    
-    fig = px.line(df_chart, x='data_date', y='acum_12m', title=f"Histórico 12 Meses - {tipo_indice.split()[0]}")
-    
-    # Visual Dark
-    fig.update_traces(line_color=cor_tema, line_width=3)
-    fig.update_layout(
-        template="plotly_dark",
-        paper_bgcolor='rgba(0,0,0,0)',
-        plot_bgcolor='rgba(0,0,0,0)',
-        font=dict(color="#E0E0E0"),
-        hovermode="x unified",
-        margin=dict(l=0, r=0, t=40, b=0)
-    )
-    fig.update_yaxes(showgrid=True, gridcolor='#333333', ticksuffix="%")
-    fig.update_xaxes(showgrid=False)
-    
-    st.plotly_chart(fig, use_container_width=True)
+    with tab2:
+        try:
+            matrix = df.pivot(index='ano', columns='mes_nome', values='valor')
+            ordem = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez']
+            matrix = matrix[ordem].sort_index(ascending=False)
+            st.dataframe(matrix.style.background_gradient(cmap=cmap_leves, axis=None, vmin=-1.5, vmax=1.5).format("{:.2f}"), use_container_width=True, height=500)
+        except: st.warning("Matriz indisponível.")
 
-# MATRIZ PRINCIPAL
-with tab2:
-    try:
-        matrix = df.pivot(index='ano', columns='mes_nome', values='valor')
-        ordem = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez']
-        matrix = matrix[ordem].sort_index(ascending=False)
-        st.dataframe(
-            matrix.style.background_gradient(cmap=cmap_leves, axis=None, vmin=-1.5, vmax=1.5).format("{:.2f}"), 
-            use_container_width=True, 
-            height=500
-        )
-    except:
-        st.warning("Matriz indisponível.")
-
-# TABELA PRINCIPAL (COM DOWNLOAD)
-with tab3:
-    # Botão Download
-    csv_principal = df[['data_fmt', 'valor', 'acum_ano', 'acum_12m']].to_csv(index=False).encode('utf-8')
-    st.download_button("📥 Baixar dados em CSV", csv_principal, f"{tipo_indice.split()[0]}_historico.csv", "text/csv")
-
-    st.dataframe(df[['data_fmt', 'valor', 'acum_ano', 'acum_12m']], use_container_width=True, hide_index=True)
+    with tab3:
+        csv_principal = df[['data_fmt', 'valor', 'acum_ano', 'acum_12m']].to_csv(index=False).encode('utf-8')
+        st.download_button("📥 Baixar CSV", csv_principal, f"{tipo_indice.split()[0]}_historico.csv", "text/csv")
+        st.dataframe(df[['data_fmt', 'valor', 'acum_ano', 'acum_12m']], use_container_width=True, hide_index=True)

@@ -3,7 +3,7 @@ import sidrapy
 import pandas as pd
 import numpy as np
 import plotly.express as px
-from datetime import date, datetime, timedelta
+from datetime import date
 import requests
 import yfinance as yf
 from matplotlib.colors import LinearSegmentedColormap
@@ -27,7 +27,6 @@ st.markdown("""
         border: 1px solid #e0e0e0;
         padding: 15px;
         border-radius: 8px;
-        margin-bottom: 10px;
     }
     .streamlit-expanderHeader {
         background-color: #f8f9fa;
@@ -36,161 +35,66 @@ st.markdown("""
         color: #003366;
         border: 1px solid #ddd;
     }
-    .error-box {
-        background-color: #fff2f2;
-        border-left: 4px solid #ff4d4d;
-        padding: 10px;
-        margin: 10px 0;
-        border-radius: 4px;
-    }
-    .success-box {
-        background-color: #f2fff2;
-        border-left: 4px solid #4dff4d;
-        padding: 10px;
-        margin: 10px 0;
-        border-radius: 4px;
-    }
-    .info-box {
-        background-color: #f0f8ff;
-        border-left: 4px solid #007bff;
-        padding: 10px;
-        margin: 10px 0;
-        border-radius: 4px;
-        font-size: 0.9em;
-    }
 </style>
 """, unsafe_allow_html=True)
 
 cores_leves = ["#FFB3B3", "#FFFFFF", "#B3FFB3"] # Vermelho Suave, Branco, Verde Suave
 cmap_leves = LinearSegmentedColormap.from_list("pastel_rdylgn", cores_leves)
 
-# --- FUNÇÕES UTILITÁRIAS ---
-def format_date(dt):
-    """Formata data para exibição"""
-    if pd.isna(dt):
-        return "Não disponível"
-    return dt.strftime('%d/%m/%Y')
+# --- FUNÇÕES DE CARGA DE DADOS ---
 
-def get_data_update_info(df, source_name):
-    """Retorna informação de atualização dos dados"""
-    if df.empty:
-        return f"{source_name}: Sem dados"
-    
-    if 'data_date' in df.columns:
-        last_date = df['data_date'].max()
-        return f"{source_name}: Atualizado em {format_date(last_date)}"
-    elif 'data_relatorio' in df.columns:
-        last_date = df['data_relatorio'].max()
-        return f"{source_name}: Atualizado em {format_date(last_date)}"
-    else:
-        return f"{source_name}: Disponível"
-
-def format_valor_focus(valor, nome):
-    """Formata valores do Focus para exibição"""
-    if pd.isna(valor):
-        return "-"
-    if 'Câmbio' in nome:
-        return f"R$ {valor:.2f}"
-    elif any(x in nome for x in ['comercial', 'Conta corrente', 'Investimento']):
-        return f"US$ {valor:.2f} B"
-    else:
-        return f"{valor:.2f}%"
-
-# --- FUNÇÕES DE CARGA DE DADOS COM TRATAMENTO DE ERRO MELHORADO ---
-
-@st.cache_data(show_spinner="Carregando dados do IBGE...")
-def get_sidra_data(table_code, variable_code, test_mode=False):
-    """Função para obter dados do IBGE com suporte a test_mode"""
-    if test_mode:
-        # Retorna dataframe vazio para teste rápido
-        return pd.DataFrame()
-    
+# 1. IBGE (Sidra)
+@st.cache_data
+def get_sidra_data(table_code, variable_code):
     try:
-        with st.spinner(f"Buscando dados do IBGE (Tabela {table_code})..."):
-            dados_raw = sidrapy.get_table(
-                table_code=table_code, territorial_level="1", 
-                ibge_territorial_code="all", variable=variable_code, 
-                period="last 360"
-            )
-        
-        if dados_raw.empty: 
-            st.warning(f"Tabela {table_code} do IBGE retornou vazia")
-            return pd.DataFrame()
+        dados_raw = sidrapy.get_table(
+            table_code=table_code, territorial_level="1", ibge_territorial_code="all", 
+            variable=variable_code, period="last 360"
+        )
+        if dados_raw.empty: return pd.DataFrame()
         
         df = dados_raw.iloc[1:].copy()
         df.rename(columns={'V': 'valor', 'D2N': 'mes_ano'}, inplace=True)
         df['valor'] = pd.to_numeric(df['valor'], errors='coerce')
         df['data_date'] = pd.to_datetime(df['D2C'], format="%Y%m", errors='coerce')
         df['ano'] = df['D2C'].str.slice(0, 4)
-        
         return processar_dataframe_comum(df)
-        
     except Exception as e:
-        st.error(f"❌ Erro ao carregar dados do IBGE: {str(e)}")
         return pd.DataFrame()
 
-@st.cache_data(show_spinner="Carregando dados do BCB...")
-def get_bcb_data(codigo_serie, serie_nome="", test_mode=False):
-    """Função para obter dados do BCB com suporte a test_mode"""
-    if test_mode:
-        # Retorna dataframe vazio para teste rápido
-        return pd.DataFrame()
-    
+# 2. Banco Central (SGS - Índices Mensais)
+@st.cache_data
+def get_bcb_data(codigo_serie):
     try:
         url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo_serie}/dados?formato=json"
         
+        # Headers e Verify=False para evitar erros de conexão com o Governo
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'
         }
-        
-        with st.spinner(f"Buscando série {codigo_serie} do BCB..."):
-            response = requests.get(url, headers=headers, verify=False, timeout=15)
-            response.raise_for_status()
+        response = requests.get(url, headers=headers, verify=False, timeout=10)
+        response.raise_for_status()
         
         df = pd.DataFrame(response.json())
-        
-        if df.empty:
-            st.warning(f"Série {codigo_serie} do BCB retornou vazia")
-            return pd.DataFrame()
-        
         df['data_date'] = pd.to_datetime(df['data'], format='%d/%m/%Y', errors='coerce')
         df['valor'] = pd.to_numeric(df['valor'], errors='coerce')
         df['D2C'] = df['data_date'].dt.strftime('%Y%m')
         df['ano'] = df['data_date'].dt.strftime('%Y')
-        
         return processar_dataframe_comum(df)
-        
-    except requests.exceptions.Timeout:
-        st.error(f"⏰ Timeout ao acessar série {codigo_serie} do BCB")
-        return pd.DataFrame()
-    except requests.exceptions.RequestException as e:
-        st.error(f"🔗 Erro de conexão com BCB (Série {codigo_serie}): {str(e)}")
-        return pd.DataFrame()
     except Exception as e:
-        st.error(f"❌ Erro inesperado no BCB: {str(e)}")
         return pd.DataFrame()
 
-@st.cache_data(ttl=3600, show_spinner="Carregando expectativas de mercado...")
-def get_focus_data(test_mode=False):
-    """Função para obter dados do Focus com suporte a test_mode"""
-    if test_mode:
-        # Retorna dataframe vazio para teste rápido
-        return pd.DataFrame()
-    
+# 3. Boletim Focus (CORRIGIDO)
+@st.cache_data(ttl=3600)
+def get_focus_data():
     try:
+        # Aumentamos o TOP para garantir que pegamos o histórico recente de todos os indicadores
         url = "https://olinda.bcb.gov.br/olinda/servico/Expectativas/versao/v1/odata/ExpectativasMercadoAnuais?$top=5000&$orderby=Data%20desc&$format=json"
         
         headers = {'User-Agent': 'Mozilla/5.0'}
-        with st.spinner("Buscando Boletim Focus..."):
-            response = requests.get(url, headers=headers, verify=False, timeout=15)
-            response.raise_for_status()
-            data_json = response.json()
-        
+        response = requests.get(url, headers=headers, verify=False, timeout=10)
+        data_json = response.json()
         df = pd.DataFrame(data_json['value'])
-        
-        if df.empty:
-            st.warning("Boletim Focus retornou vazio")
-            return pd.DataFrame()
         
         indicadores = [
             'IPCA', 'PIB Total', 'Selic', 'Câmbio', 'IGP-M',
@@ -200,108 +104,49 @@ def get_focus_data(test_mode=False):
         ]
         
         df = df[df['Indicador'].isin(indicadores)]
-        df = df.rename(columns={
-            'Data': 'data_relatorio', 
-            'DataReferencia': 'ano_referencia', 
-            'Mediana': 'previsao'
-        })
+        df = df.rename(columns={'Data': 'data_relatorio', 'DataReferencia': 'ano_referencia', 'Mediana': 'previsao'})
         
+        # Tipagem correta
         df['ano_referencia'] = pd.to_numeric(df['ano_referencia'], errors='coerce')
         df['previsao'] = pd.to_numeric(df['previsao'], errors='coerce')
         df['data_relatorio'] = pd.to_datetime(df['data_relatorio'])
         
+        # --- A CORREÇÃO PRINCIPAL ---
+        # Ordena da data mais recente para a mais antiga
         df = df.sort_values('data_relatorio', ascending=False)
+        # Remove duplicatas mantendo apenas a PRIMEIRA ocorrência (a mais recente)
+        # Isso evita misturar a previsão de hoje com a de ontem
         df = df.drop_duplicates(subset=['Indicador', 'ano_referencia'], keep='first')
         
         return df
-        
-    except requests.exceptions.Timeout:
-        st.error("⏰ Timeout ao acessar Boletim Focus")
-        return pd.DataFrame()
-    except requests.exceptions.RequestException as e:
-        st.error(f"🔗 Erro de conexão com Focus: {str(e)}")
-        return pd.DataFrame()
     except Exception as e:
-        st.error(f"❌ Erro inesperado no Focus: {str(e)}")
         return pd.DataFrame()
 
-@st.cache_data(ttl=300, show_spinner="Atualizando cotações...")
-def get_currency_realtime(test_mode=False):
-    """Função para obter cotações em tempo real com suporte a test_mode"""
-    if test_mode:
-        # Retorna dataframe vazio para teste rápido
-        return pd.DataFrame()
-    
+# 4. Cotação de Moedas (Tempo Real)
+@st.cache_data(ttl=300)
+def get_currency_realtime():
     try:
         tickers = ["USDBRL=X", "EURBRL=X"]
         dados = {}
-        
-        with st.spinner("Consultando cotações em tempo real..."):
-            for t in tickers:
-                try:
-                    ticker_obj = yf.Ticker(t)
-                    # Método mais confiável usando history
-                    hist = ticker_obj.history(period="2d", interval="1d")
-                    
-                    if not hist.empty:
-                        preco_atual = hist['Close'].iloc[-1]
-                        fechamento_anterior = hist['Close'].iloc[0] if len(hist) > 1 else preco_atual
-                        variacao = ((preco_atual - fechamento_anterior) / fechamento_anterior) * 100
-                        
-                        key = "USDBRL" if "USD" in t else "EURBRL"
-                        dados[key] = {'bid': float(preco_atual), 'pctChange': float(variacao)}
-                    else:
-                        # Fallback para método anterior
-                        info = ticker_obj.info
-                        preco_atual = info.get('regularMarketPrice', 0) or info.get('currentPrice', 0)
-                        fechamento_anterior = info.get('previousClose', preco_atual)
-                        variacao = ((preco_atual - fechamento_anterior) / fechamento_anterior) * 100 if fechamento_anterior != 0 else 0
-                        
-                        key = "USDBRL" if "USD" in t else "EURBRL"
-                        dados[key] = {'bid': float(preco_atual), 'pctChange': float(variacao)}
-                        
-                except Exception as e:
-                    st.warning(f"Erro ao buscar {t}: {str(e)}")
-                    # Valores padrão em caso de erro
-                    if "USD" in t:
-                        dados["USDBRL"] = {'bid': 5.50, 'pctChange': 0.0}
-                    elif "EUR" in t:
-                        dados["EURBRL"] = {'bid': 6.00, 'pctChange': 0.0}
-        
-        if not dados:
-            st.warning("Não foi possível obter cotações em tempo real")
-            # Valores padrão de fallback
-            dados = {
-                "USDBRL": {'bid': 5.50, 'pctChange': 0.0},
-                "EURBRL": {'bid': 6.00, 'pctChange': 0.0}
-            }
-            
+        for t in tickers:
+            ticker_obj = yf.Ticker(t)
+            info = ticker_obj.fast_info
+            preco_atual = info['last_price']
+            fechamento_anterior = info['previous_close']
+            variacao = ((preco_atual - fechamento_anterior) / fechamento_anterior) * 100
+            key = t.replace("=X", "") 
+            dados[key] = {'bid': preco_atual, 'pctChange': variacao}
         df = pd.DataFrame.from_dict(dados, orient='index')
         return df
-        
     except Exception as e:
-        st.error(f"❌ Erro nas cotações em tempo real: {str(e)}")
-        # Retorna valores padrão
-        dados = {
-            "USDBRL": {'bid': 5.50, 'pctChange': 0.0},
-            "EURBRL": {'bid': 6.00, 'pctChange': 0.0}
-        }
-        return pd.DataFrame.from_dict(dados, orient='index')
-
-@st.cache_data(ttl=86400, show_spinner="Carregando histórico de câmbio...")
-def get_cambio_historico(test_mode=False):
-    """Função para obter histórico de câmbio com suporte a test_mode"""
-    if test_mode:
-        # Retorna dataframe vazio para teste rápido
         return pd.DataFrame()
-    
+
+# 5. Histórico de Câmbio
+@st.cache_data(ttl=86400)
+def get_cambio_historico():
     try:
-        with st.spinner("Baixando histórico de câmbio (pode levar alguns segundos)..."):
-            df = yf.download(["USDBRL=X", "EURBRL=X"], start="1994-07-01", progress=False)
-        
-        if df.empty: 
-            st.warning("Histórico de câmbio retornou vazio")
-            return pd.DataFrame()
+        df = yf.download(["USDBRL=X", "EURBRL=X"], start="1994-07-01", progress=False)
+        if df.empty: return pd.DataFrame()
         
         df = df['Close']
         if df.index.tz is None:
@@ -314,128 +159,65 @@ def get_cambio_historico(test_mode=False):
         
         df = df.rename(columns={'USDBRL=X': 'Dólar', 'EURBRL=X': 'Euro'})
         df = df.ffill()
-        
         return df
-        
     except Exception as e:
-        st.error(f"❌ Erro no histórico de câmbio: {str(e)}")
         return pd.DataFrame()
 
-@st.cache_data(ttl=3600, show_spinner="Carregando dados macroeconômicos...")
-def get_macro_real(test_mode=False):
-    """Função para obter dados macroeconômicos com suporte a test_mode"""
-    if test_mode:
-        # Retorna dicionário vazio para teste rápido
-        return {"dados": {}, "ultima_atualizacao": "Não disponível", "metodologia": {}}
-    
-    # SÉRIES CORRETAS DO BCB SGS (baseado nas suas informações)
-    series = {
-        'PIB Nominal (R$ Mi)': {'codigo': 4380, 'tipo': 'pib'},
-        'Dívida Líq. (% PIB)': {'codigo': 4513, 'tipo': 'percentual'},
-        'Res. Primário (% PIB)': {'codigo': 4520, 'tipo': 'percentual'},
-        'Res. Nominal (% PIB)': {'codigo': 4521, 'tipo': 'percentual'},
-        'Balança Com. (US$ Mi)': {'codigo': 22705, 'tipo': 'externo'},
-        'Trans. Correntes (US$ Mi)': {'codigo': 22707, 'tipo': 'externo'},
-        'IDP (US$ Mi)': {'codigo': 22704, 'tipo': 'externo'}
-    }
-    
-    resultados = {}
-    ultimas_datas = []
-    metodologia = {}
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    
-    try:
-        for nome, info in series.items():
-            try:
-                codigo = info['codigo']
-                tipo = info['tipo']
-                
-                # Para dados externos, pegar mais dados para cálculo de 12 meses
-                if tipo == 'externo':
-                    url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo}/dados/ultimos/24?formato=json"
-                else:
-                    url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo}/dados/ultimos/13?formato=json"
-                
-                resp = requests.get(url, headers=headers, verify=False, timeout=10)
-                df = pd.DataFrame(resp.json())
-                
-                if df.empty:
-                    st.warning(f"Série {nome} ({codigo}) retornou vazia")
-                    continue
-                
-                df['valor'] = pd.to_numeric(df['valor'], errors='coerce')
-                df['data'] = pd.to_datetime(df['data'], format='%d/%m/%Y', errors='coerce')
-                df = df.sort_values('data', ascending=True)
-                
-                # Guarda a última data disponível
-                if not df['data'].empty:
-                    ultimas_datas.append(df['data'].max())
-                
-                # Cálculos específicos para cada tipo
-                if tipo == 'pib':
-                    # PIB Nominal - cálculo do acumulado 12 meses (últimos 4 trimestres)
-                    if len(df) >= 4:
-                        # Supondo dados trimestrais - pegar últimos 4 trimestres
-                        valor_final = df['valor'].iloc[-4:].sum() / 1_000_000  # Convertendo para Trilhões
-                        metodologia[nome] = "Acumulado dos últimos 4 trimestres (12 meses)"
-                    else:
-                        valor_final = df['valor'].iloc[-1] / 1_000_000
-                        metodologia[nome] = "Último trimestre disponível"
-                
-                elif tipo == 'externo':
-                    # Dados do setor externo - soma dos últimos 12 meses
-                    if len(df) >= 12:
-                        valor_final = df['valor'].iloc[-12:].sum() / 1_000  # Convertendo para Bilhões
-                        metodologia[nome] = "Soma dos últimos 12 meses"
-                    else:
-                        valor_final = df['valor'].sum() / 1_000
-                        metodologia[nome] = "Soma de todos os meses disponíveis"
-                
-                else:  # percentual (% PIB)
-                    # Para indicadores em % do PIB, usar o último valor disponível
-                    valor_final = df['valor'].iloc[-1]
-                    metodologia[nome] = "Último período disponível"
-                
-                resultados[nome] = valor_final
-                
-            except Exception as e:
-                st.warning(f"Erro na série {nome}: {str(e)}")
-                continue
-        
-        # Determina a data de atualização (mais recente entre as séries)
-        ultima_atualizacao = "Não disponível"
-        if ultimas_datas:
-            ultima_atualizacao = max(ultimas_datas).strftime('%d/%m/%Y')
-        
-        return {
-            "dados": resultados,
-            "ultima_atualizacao": ultima_atualizacao,
-            "metodologia": metodologia
-        }
-        
-    except Exception as e:
-        st.error(f"❌ Erro geral nos dados macroeconômicos: {str(e)}")
-        return {"dados": {}, "ultima_atualizacao": "Não disponível", "metodologia": {}}
-
+# 6. Processamento Comum
 def processar_dataframe_comum(df):
-    if df.empty: 
-        return df
-    
+    if df.empty: return df
     df = df.sort_values('data_date', ascending=True)
     df['mes_num'] = df['data_date'].dt.month
-    meses_map = {
-        1: 'Jan', 2: 'Fev', 3: 'Mar', 4: 'Abr', 5: 'Mai', 6: 'Jun',
-        7: 'Jul', 8: 'Ago', 9: 'Set', 10: 'Out', 11: 'Nov', 12: 'Dez'
-    }
+    meses_map = {1: 'Jan', 2: 'Fev', 3: 'Mar', 4: 'Abr', 5: 'Mai', 6: 'Jun',
+                 7: 'Jul', 8: 'Ago', 9: 'Set', 10: 'Out', 11: 'Nov', 12: 'Dez'}
     df['mes_nome'] = df['mes_num'].map(meses_map)
-    df['ano'] = df['data_date'].dt.strftime('%Y')
     df['data_fmt'] = df['mes_nome'] + '/' + df['ano']
     df['fator'] = 1 + (df['valor'] / 100)
     df['acum_ano'] = (df.groupby('ano')['fator'].cumprod() - 1) * 100
     df['acum_12m'] = (df['fator'].rolling(window=12, min_periods=12).apply(np.prod, raw=True) - 1) * 100
-    
     return df.sort_values('data_date', ascending=False)
 
+# 7. Dados Macroeconômicos Reais (SGS)
+@st.cache_data(ttl=3600)
+def get_macro_real():
+    series = {
+        'PIB (R$ Bi)': 4382,
+        'Dívida Líq. (% PIB)': 4513,
+        'Res. Primário (% PIB)': 5362,
+        'Res. Nominal (% PIB)': 5360,
+        'Balança Com. (US$ Mi)': 22707,
+        'Trans. Correntes (US$ Mi)': 22724,
+        'IDP (US$ Mi)': 22885
+    }
+    
+    resultados = {}
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    
+    try:
+        for nome, codigo in series.items():
+            url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo}/dados/ultimos/13?formato=json"
+            resp = requests.get(url, headers=headers, verify=False, timeout=5)
+            df = pd.DataFrame(resp.json())
+            df['valor'] = pd.to_numeric(df['valor'])
+            
+            if df.empty: continue
+            
+            if nome == 'PIB (R$ Bi)':
+                valor_final = df['valor'].iloc[-1] / 1_000_000 
+            elif 'Balança' in nome or 'Trans.' in nome or 'IDP' in nome:
+                valor_final = df['valor'].iloc[-12:].sum() / 1_000
+            elif 'Primário' in nome or 'Nominal' in nome:
+                valor_final = df['valor'].iloc[-1] * -1
+            else:
+                valor_final = df['valor'].iloc[-1]
+            
+            resultados[nome] = valor_final
+            
+        return resultados
+    except Exception as e:
+        return {}
+
+# --- CÁLCULO ---
 def calcular_correcao(df, valor, data_ini_code, data_fim_code):
     is_reverso = data_ini_code > data_fim_code
     if is_reverso:
@@ -452,14 +234,8 @@ def calcular_correcao(df, valor, data_ini_code, data_fim_code):
     fator_acumulado = df_periodo['fator'].prod()
     valor_final = valor / fator_acumulado if is_reverso else valor * fator_acumulado
     pct_total = (fator_acumulado - 1) * 100
-    
     return {
-        'valor_final': valor_final, 
-        'percentual': pct_total, 
-        'fator': fator_acumulado, 
-        'is_reverso': is_reverso,
-        'periodo_inicio': periodo_inicio,
-        'periodo_fim': periodo_fim
+        'valor_final': valor_final, 'percentual': pct_total, 'fator': fator_acumulado, 'is_reverso': is_reverso
     }, None
 
 # ==============================================================================
@@ -468,688 +244,239 @@ def calcular_correcao(df, valor, data_ini_code, data_fim_code):
 try:
     st.sidebar.image("Logo_VPL_Consultoria_Financeira.png", use_container_width=True)
 except:
-    st.sidebar.markdown("## VPL CONSULTORIA")
-    st.sidebar.markdown("**Inteligência Financeira**")
+    st.sidebar.write("VPL CONSULTORIA")
 
-st.sidebar.divider()
-st.sidebar.header("⚙️ Configurações")
+st.sidebar.header("Configurações")
 
 tipo_indice = st.sidebar.selectbox(
     "Selecione o Indicador",
     ["IPCA (Inflação Oficial)", "INPC (Salários)", "IGP-M (Aluguéis)", "SELIC (Taxa Básica)", "CDI (Investimentos)"]
 )
 
-# 📘 METODOLOGIA
-with st.sidebar.expander("📘 Metodologia", expanded=False):
-    st.markdown("""
-    ### 📊 Fontes dos Dados
-    - **IBGE (Sidra)**: Dados oficiais de IPCA e INPC
-    - **Banco Central do Brasil (BCB)**: Séries temporais do SGS
-    - **Boletim Focus**: Expectativas de mercado do BCB
-    - **Yahoo Finance**: Cotações de câmbio em tempo real
-    
-    ### 📅 Periodicidade
-    - **Dados mensais**: IPCA, INPC, IGP-M, SELIC, CDI
-    - **Dados diários**: Câmbio (Dólar/Euro)
-    - **Expectativas**: Atualizadas semanalmente (Focus)
-    
-    ### 🧮 Métodos de Cálculo
-    - **Correção monetária**: Fator acumulado do período
-    - **Acumulado 12 meses**: Produto dos últimos 12 meses
-    - **Acumulado no ano**: Produto desde janeiro
-    - **Matriz de calor**: Variação mensal por ano
-    
-    ### ⚠️ Observações
-    - Cálculos ajustados por sazonalidade quando aplicável
-    - Taxas CDI e SELIC convertidas para base mensal equivalente
-    - Todos os valores em Reais (R$) corrigidos pela inflação
-    - Dados sujeitos a revisão pelas fontes oficiais
-    """)
-
-st.sidebar.divider()
-
-# 🔧 STATUS DAS APIs (ATUALIZADO)
-st.sidebar.subheader("🔧 Status das APIs")
-try:
-    # Teste simplificado das APIs
-    api_status = {}
-    
-    # IBGE
-    try:
-        df_test = get_sidra_data("1737", "63", test_mode=False)
-        api_status["IBGE"] = not df_test.empty
-    except:
-        api_status["IBGE"] = False
-    
-    # BCB
-    try:
-        df_test = get_bcb_data("4390", test_mode=False)
-        api_status["BCB"] = not df_test.empty
-    except:
-        api_status["BCB"] = False
-    
-    # Focus
-    try:
-        df_test = get_focus_data(test_mode=False)
-        api_status["Focus"] = not df_test.empty
-    except:
-        api_status["Focus"] = False
-    
-    # Câmbio
-    try:
-        df_test = get_currency_realtime(test_mode=False)
-        api_status["Câmbio"] = not df_test.empty
-    except:
-        api_status["Câmbio"] = False
-    
-    # Exibir status
-    for api_name, status in api_status.items():
-        icon = "🟢" if status else "🔴"
-        st.sidebar.markdown(f"{icon} {api_name}")
-        
-except Exception as e:
-    st.sidebar.info("Status das APIs não disponível")
-
-st.sidebar.divider()
-
-# 🧮 CALCULADORA
-st.sidebar.subheader("🧮 Calculadora")
-valor_input = st.sidebar.number_input("Valor (R$)", value=1000.00, step=100.00, format="%.2f")
-
-# Carregar dados do índice selecionado
-with st.spinner(f"Carregando dados do {tipo_indice.split()[0]}..."):
+with st.spinner(f"Carregando dados..."):
     if "IPCA" in tipo_indice:
         df = get_sidra_data("1737", "63")
-        cor_tema = "#00BFFF"
-        fonte = "IBGE/Sidra"
+        cor_tema = "#00BFFF" 
     elif "INPC" in tipo_indice:
         df = get_sidra_data("1736", "44")
-        cor_tema = "#00FF7F"
-        fonte = "IBGE/Sidra"
+        cor_tema = "#00FF7F" 
     elif "IGP-M" in tipo_indice:
-        df = get_bcb_data("189", "IGP-M")
-        cor_tema = "#FF6347"
-        fonte = "BCB/SGS"
+        df = get_bcb_data("189")
+        cor_tema = "#FF6347" 
     elif "SELIC" in tipo_indice:
-        df = get_bcb_data("4390", "SELIC")
-        cor_tema = "#FFD700"
-        fonte = "BCB/SGS"
+        df = get_bcb_data("4390")
+        cor_tema = "#FFD700" 
     elif "CDI" in tipo_indice:
-        df = get_bcb_data("4391", "CDI")
-        cor_tema = "#9370DB"
-        fonte = "BCB/SGS"
+        df = get_bcb_data("4391")
+        cor_tema = "#FFFFFF" 
 
-# Tratamento de erro explícito
 if df.empty:
-    error_container = st.container()
-    with error_container:
-        st.error(f"""
-        ⚠️ **Erro ao carregar dados do índice principal**
-        
-        **Fonte:** {fonte}
-        **Índice:** {tipo_indice.split()[0]}
-        
-        **Possíveis causas:**
-        1. Conexão com {fonte} interrompida
-        2. API temporariamente indisponível
-        3. Limite de requisições excedido
-        4. Dados em manutenção
-        
-        **Soluções:**
-        - Tente recarregar a página (F5)
-        - Verifique sua conexão com a internet
-        - Tente novamente em alguns minutos
-        - Use os dados históricos já carregados
-        
-        **Status atual:** ❌ Indisponível
-        """)
-    
-    # Permite continuar com dados limitados
-    st.warning("Usando dados limitados. Algumas funcionalidades podem estar indisponíveis.")
-    
-    # Cria um dataframe vazio com estrutura mínima
-    df = pd.DataFrame(columns=['data_date', 'valor', 'acum_ano', 'acum_12m', 'data_fmt', 'D2C', 'ano', 'mes_nome'])
-else:
-    # Mostra informação de sucesso
-    update_info = get_data_update_info(df, fonte)
-    st.sidebar.markdown(f"<div class='success-box'><small>✅ {update_info}</small></div>", unsafe_allow_html=True)
+    st.error("Erro ao carregar dados. Verifique a conexão com o BCB/IBGE.")
+    st.stop()
 
-# Configuração da calculadora
-if not df.empty:
-    lista_anos = sorted(df['ano'].unique(), reverse=True)
-else:
-    lista_anos = [str(date.today().year - i) for i in range(5)]
+# --- CALCULADORA ---
+st.sidebar.divider()
+st.sidebar.subheader("Calculadora")
+valor_input = st.sidebar.number_input("Valor (R$)", value=1000.00, step=100.00, format="%.2f")
 
+lista_anos = sorted(df['ano'].unique(), reverse=True)
 lista_meses_nome = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez']
-mapa_meses = {
-    'Jan': '01', 'Fev': '02', 'Mar': '03', 'Abr': '04', 'Mai': '05', 'Jun': '06',
-    'Jul': '07', 'Ago': '08', 'Set': '09', 'Out': '10', 'Nov': '11', 'Dez': '12'
-}
+mapa_meses = {'Jan': '01', 'Fev': '02', 'Mar': '03', 'Abr': '04', 'Mai': '05', 'Jun': '06',
+              'Jul': '07', 'Ago': '08', 'Set': '09', 'Out': '10', 'Nov': '11', 'Dez': '12'}
 
-st.sidebar.markdown("**📅 Data Referência**")
+st.sidebar.markdown("**Data Referência**")
 c1, c2 = st.sidebar.columns(2)
-mes_ini = c1.selectbox("Mes Ini", lista_meses_nome, index=0, label_visibility="collapsed", key="mes_ini")
-ano_ini = c2.selectbox("Ano Ini", lista_anos, index=min(1, len(lista_anos)-1), label_visibility="collapsed", key="ano_ini")
+mes_ini = c1.selectbox("Mes Ini", lista_meses_nome, index=0, label_visibility="collapsed")
+ano_ini = c2.selectbox("Ano Ini", lista_anos, index=1 if len(lista_anos)>1 else 0, label_visibility="collapsed")
 
-st.sidebar.markdown("**🎯 Data Alvo**")
+st.sidebar.markdown("**Data Alvo**")
 c3, c4 = st.sidebar.columns(2)
-mes_fim = c3.selectbox("Mes Fim", lista_meses_nome, index=9, label_visibility="collapsed", key="mes_fim")
-ano_fim = c4.selectbox("Ano Fim", lista_anos, index=0, label_visibility="collapsed", key="ano_fim")
+mes_fim = c3.selectbox("Mes Fim", lista_meses_nome, index=9, label_visibility="collapsed")
+ano_fim = c4.selectbox("Ano Fim", lista_anos, index=0, label_visibility="collapsed")
 
-if st.sidebar.button("Calcular", type="primary", use_container_width=True):
+if st.sidebar.button("Calcular", type="primary"):
     code_ini = f"{ano_ini}{mapa_meses[mes_ini]}"
     code_fim = f"{ano_fim}{mapa_meses[mes_fim]}"
+    res, erro = calcular_correcao(df, valor_input, code_ini, code_fim)
     
-    if df.empty:
-        st.sidebar.error("Dados insuficientes para cálculo")
+    if erro:
+        st.error(erro)
     else:
-        res, erro = calcular_correcao(df, valor_input, code_ini, code_fim)
-        
-        if erro:
-            st.sidebar.error(f"❌ {erro}")
-        else:
-            st.sidebar.divider()
-            nome_indice = tipo_indice.split()[0]
-            tipo_op = "Rendimento" if nome_indice in ["SELIC", "CDI"] else "Correção"
-            texto_op = "Descapitalização" if res['is_reverso'] else f"{tipo_op} ({nome_indice})"
-            
-            st.sidebar.markdown(f"<small>{texto_op}</small>", unsafe_allow_html=True)
-            st.sidebar.markdown(f"<h2 style='color: {cor_tema}; margin:0;'>R$ {res['valor_final']:,.2f}</h2>", unsafe_allow_html=True)
-            
-            # Card de resultados
-            st.sidebar.markdown("---")
-            st.sidebar.markdown(f"""
-            <div class='metric-card'>
-            <small>Total Período</small><br>
-            <strong>{res['percentual']:.2f}%</strong>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            st.sidebar.markdown(f"""
-            <div class='metric-card'>
-            <small>Fator de Correção</small><br>
-            <strong>{res['fator']:.6f}</strong>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            st.sidebar.markdown(f"""
-            <div class='metric-card'>
-            <small>Período</small><br>
-            <strong>{mes_ini}/{ano_ini} → {mes_fim}/{ano_fim}</strong>
-            </div>
-            """, unsafe_allow_html=True)
+        st.sidebar.divider()
+        nome_indice = tipo_indice.split()[0]
+        tipo_op = "Rendimento" if nome_indice in ["SELIC", "CDI"] else "Correção"
+        texto_op = "Descapitalização" if res['is_reverso'] else f"{tipo_op} ({nome_indice})"
+        st.sidebar.markdown(f"<small>{texto_op}</small>", unsafe_allow_html=True)
+        st.sidebar.markdown(f"<h2 style='color: {cor_tema}; margin:0;'>R$ {res['valor_final']:,.2f}</h2>", unsafe_allow_html=True)
+        st.sidebar.markdown(f"Total Período: **{res['percentual']:.2f}%**")
+        st.sidebar.markdown(f"Fator de Correção: **{res['fator']:.6f}**")
 
 # ==============================================================================
 # PAINEL PRINCIPAL
 # ==============================================================================
 
-# CABEÇALHO PRINCIPAL
-st.title(f"📊 Painel: {tipo_indice.split()[0]}")
-if not df.empty:
-    update_date = df['data_date'].max() if 'data_date' in df.columns else None
-    update_str = format_date(update_date) if update_date else "Não disponível"
-    st.caption(f"Fonte: {fonte} • Última atualização: {update_str}")
-else:
-    st.caption(f"Fonte: {fonte} • Dados temporariamente indisponíveis")
-
-if not df.empty:
-    # KPIs PRINCIPAIS
-    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-    
-    with kpi1:
-        try:
-            valor_mes = df.iloc[0]['valor'] if not df.empty else 0
-            st.metric("Taxa do Mês", f"{valor_mes:.2f}%")
-        except:
-            st.metric("Taxa do Mês", "N/D")
-    
-    with kpi2:
-        try:
-            acum_12m = df.iloc[0]['acum_12m'] if not df.empty and 'acum_12m' in df.columns else 0
-            st.metric("Acumulado 12 Meses", f"{acum_12m:.2f}%")
-        except:
-            st.metric("Acumulado 12 Meses", "N/D")
-    
-    with kpi3:
-        try:
-            acum_ano = df.iloc[0]['acum_ano'] if not df.empty and 'acum_ano' in df.columns else 0
-            st.metric("Acumulado Ano (YTD)", f"{acum_ano:.2f}%")
-        except:
-            st.metric("Acumulado Ano (YTD)", "N/D")
-    
-    with kpi4:
-        try:
-            inicio_serie = df['ano'].min() if not df.empty else "N/D"
-            st.metric("Início da Série", inicio_serie)
-        except:
-            st.metric("Início da Série", "N/D")
-    
-    # ABA DO GRÁFICO
-    tab1, tab2, tab3 = st.tabs(["📈 Gráfico", "📅 Matriz de Calor", "📋 Tabela Detalhada"])
-    
-    with tab1:
-        if not df.empty:
-            df_chart = df.dropna(subset=['acum_12m']).sort_values('data_date')
-            
-            # Filtro para séries mais longas
-            if any(idx in tipo_indice for idx in ["IGP-M", "SELIC", "CDI"]):
-                df_chart = df_chart[df_chart['ano'].astype(int) >= 2000]
-            
-            if not df_chart.empty:
-                fig = px.line(
-                    df_chart, 
-                    x='data_date', 
-                    y='acum_12m', 
-                    title=f"Histórico 12 Meses - {tipo_indice.split()[0]}",
-                    labels={'acum_12m': 'Acumulado 12 meses (%)', 'data_date': 'Data'}
-                )
-                fig.update_traces(line_color=cor_tema, line_width=3)
-                fig.update_layout(
-                    template="plotly_dark", 
-                    paper_bgcolor='rgba(0,0,0,0)', 
-                    plot_bgcolor='rgba(0,0,0,0)',
-                    font=dict(color="#E0E0E0"), 
-                    hovermode="x unified", 
-                    margin=dict(l=0, r=0, t=40, b=0),
-                    yaxis_title="%",
-                    xaxis_title=""
-                )
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.warning("Dados insuficientes para gerar o gráfico")
-        else:
-            st.info("Aguardando dados para exibir o gráfico")
-    
-    with tab2:
-        if not df.empty and 'mes_nome' in df.columns and 'ano' in df.columns:
-            try:
-                matrix = df.pivot(index='ano', columns='mes_nome', values='valor')
-                ordem = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez']
-                
-                # Mantém apenas colunas existentes
-                ordem = [col for col in ordem if col in matrix.columns]
-                if ordem:
-                    matrix = matrix[ordem].sort_index(ascending=False)
-                    
-                    # Define limites dinâmicos para o gradiente
-                    # Para IPCA/INPC: -2% a +2% são limites razoáveis
-                    if any(x in tipo_indice for x in ["IPCA", "INPC", "IGP-M"]):
-                        vmin, vmax = -2, 2
-                    elif "SELIC" in tipo_indice or "CDI" in tipo_indice:
-                        vmin, vmax = 0, 2  # Taxas positivas
-                    else:
-                        # Limites dinâmicos baseados nos dados
-                        vmin = matrix.min().min() * 1.1 if not matrix.empty else -1.5
-                        vmax = matrix.max().max() * 1.1 if not matrix.empty else 1.5
-                    
-                    # Garante que vmin seja negativo para IPCA/INPC para ter vermelho/verde
-                    if any(x in tipo_indice for x in ["IPCA", "INPC", "IGP-M"]) and vmin >= 0:
-                        vmin = -0.5
-                    
-                    st.dataframe(
-                        matrix.style.background_gradient(
-                            cmap=cmap_leves, axis=None, vmin=vmin, vmax=vmax
-                        ).format("{:.2f}"), 
-                        use_container_width=True, 
-                        height=500
-                    )
-                else:
-                    st.warning("Dados insuficientes para matriz de calor")
-            except Exception as e:
-                st.error(f"Erro ao gerar matriz: {str(e)}")
-        else:
-            st.info("Aguardando dados para exibir a matriz")
-    
-    with tab3:
-        if not df.empty:
-            # Botão de download
-            csv_principal = df[['data_fmt', 'valor', 'acum_ano', 'acum_12m']].to_csv(index=False).encode('utf-8')
-            col1, col2 = st.columns([1, 4])
-            with col1:
-                st.download_button(
-                    "📥 Baixar CSV", 
-                    csv_principal, 
-                    f"{tipo_indice.split()[0]}_historico.csv", 
-                    "text/csv",
-                    use_container_width=True
-                )
-            
-            # Tabela de dados
-            df_display = df[['data_fmt', 'valor', 'acum_ano', 'acum_12m']].copy()
-            df_display.columns = ['Período', 'Taxa Mensal (%)', 'Acum. Ano (%)', 'Acum. 12M (%)']
-            st.dataframe(df_display, use_container_width=True, hide_index=True)
-        else:
-            st.info("Aguardando dados para exibir a tabela")
-
-# ==============================================================================
-# SEÇÃO FOCUS & CÂMBIO
-# ==============================================================================
-
-with st.expander("🔭 Expectativas de Mercado (Focus) & Câmbio Hoje", expanded=False):
+# FOCUS
+with st.expander("🔭 Clique para ver: Expectativas de Mercado (Focus) & Câmbio Hoje", expanded=False):
     col_top1, col_top2 = st.columns([2, 1])
     
     # FOCUS
+    df_focus = get_focus_data()
+    ano_atual = date.today().year
+    
     with col_top1:
-        st.subheader("📊 Boletim Focus")
-        df_focus = get_focus_data()
-        ano_atual = date.today().year
-        
         if not df_focus.empty:
+            # Pega a data mais recente disponível no dataframe filtrado
             ultima_data = df_focus['data_relatorio'].max()
-            data_str = format_date(ultima_data)
+            data_str = pd.to_datetime(ultima_data).strftime('%d/%m/%Y')
+            st.markdown(f"**Boletim Focus ({data_str})**")
             
-            st.caption(f"Última atualização: {data_str}")
-            st.markdown("---")
-            
-            # DESTAQUES
+            # --- DESTAQUES ---
             df_atual = df_focus[df_focus['ano_referencia'] == ano_atual]
-            if not df_atual.empty:
-                pivot_atual = df_atual.pivot_table(index='Indicador', values='previsao', aggfunc='first')
-                
-                fc1, fc2, fc3, fc4 = st.columns(4)
-                
-                def get_val(idx, default=0):
-                    try: 
-                        return pivot_atual.loc[idx, 'previsao']
-                    except: 
-                        return default
-                
-                with fc1:
-                    st.metric(f"IPCA {ano_atual}", f"{get_val('IPCA'):.2f}%")
-                with fc2:
-                    st.metric(f"Selic {ano_atual}", f"{get_val('Selic'):.2f}%")
-                with fc3:
-                    st.metric(f"PIB {ano_atual}", f"{get_val('PIB Total'):.2f}%")
-                with fc4:
-                    st.metric(f"Dólar {ano_atual}", f"R$ {get_val('Câmbio'):.2f}")
-                
-                st.markdown("---")
-                st.markdown("##### 📅 Projeções Macroeconômicas (2025 - 2027)")
-                
-                anos_exibir = [ano_atual, ano_atual + 1, ano_atual + 2]
-                df_table = df_focus[df_focus['ano_referencia'].isin(anos_exibir)].copy()
-                
-                if not df_table.empty:
-                    df_pivot_multi = df_table.pivot_table(
-                        index='Indicador', 
-                        columns='ano_referencia', 
-                        values='previsao', 
-                        aggfunc='first'
-                    )
-                    
-                    ordem = [
-                        'IPCA', 'IGP-M', 'IPCA Administrados', 'Selic', 'Câmbio', 'PIB Total', 
-                        'Dívida líquida do setor público', 'Resultado primário', 'Resultado nominal', 
-                        'Balança comercial', 'Conta corrente', 'Investimento direto no país' 
-                    ]
-                    
-                    ordem_final = [x for x in ordem if x in df_pivot_multi.index]
-                    if ordem_final:
-                        df_pivot_multi = df_pivot_multi.reindex(ordem_final)
-                        
-                        # Formatação - USANDO A FUNÇÃO format_valor_focus QUE JÁ ESTÁ DEFINIDA
-                        df_display = df_pivot_multi.copy()
-                        for col in df_display.columns:
-                            df_display[col] = df_display.apply(
-                                lambda row: format_valor_focus(row[col], row.name), 
-                                axis=1
-                            )
-                        
-                        st.dataframe(df_display, use_container_width=True)
-                    else:
-                        st.info("Nenhum indicador encontrado para os anos selecionados")
-                else:
-                    st.info("Sem dados de projeção para os próximos anos")
-            else:
-                st.warning(f"Sem dados Focus para o ano {ano_atual}")
+            pivot_atual = df_atual.pivot_table(index='Indicador', values='previsao', aggfunc='first')
+            
+            fc1, fc2, fc3, fc4 = st.columns(4)
+            def get_val(idx): 
+                try: return pivot_atual.loc[idx, 'previsao']
+                except: return 0
+            
+            fc1.metric(f"IPCA {ano_atual}", f"{get_val('IPCA'):.2f}%")
+            fc2.metric(f"Selic {ano_atual}", f"{get_val('Selic'):.2f}%")
+            fc3.metric(f"PIB {ano_atual}", f"{get_val('PIB Total'):.2f}%")
+            fc4.metric(f"Dólar {ano_atual}", f"R$ {get_val('Câmbio'):.2f}")
+            
+            st.divider()
+            st.markdown("###### 📅 Projeções Macroeconômicas (2025 - 2027)")
+            
+            anos_exibir = [ano_atual, ano_atual + 1, ano_atual + 2]
+            df_table = df_focus[df_focus['ano_referencia'].isin(anos_exibir)].copy()
+            df_pivot_multi = df_table.pivot_table(index='Indicador', columns='ano_referencia', values='previsao', aggfunc='first')
+            
+            ordem = [
+                'IPCA', 'IGP-M', 'IPCA Administrados', 'Selic', 'Câmbio', 'PIB Total', 
+                'Dívida líquida do setor público', 'Resultado primário', 'Resultado nominal', 
+                'Balança comercial', 'Conta corrente', 'Investimento direto no país' 
+            ]
+            ordem_final = [x for x in ordem if x in df_pivot_multi.index]
+            df_pivot_multi = df_pivot_multi.reindex(ordem_final)
+            
+            # Formatação
+            df_display = df_pivot_multi.copy()
+            for col in df_display.columns:
+                def formatador_inteligente(row):
+                    val = row[col]
+                    nome = row.name
+                    if pd.isna(val): return "-"
+                    if 'Câmbio' in nome: return f"R$ {val:.2f}"
+                    elif any(x in nome for x in ['comercial', 'Conta corrente', 'Investimento']): return f"US$ {val:.2f} B"
+                    else: return f"{val:.2f}%"
+                df_display[col] = df_display.apply(formatador_inteligente, axis=1)
+            
+            st.dataframe(df_display, use_container_width=True)
         else:
             st.warning("Focus indisponível (Erro na API ou Filtro).")
-            st.info("Tentando reconectar...")
-    
+
     # MOEDAS
+    df_moedas = get_currency_realtime()
     with col_top2:
-        st.subheader("💱 Câmbio (Tempo Real)")
-        df_moedas = get_currency_realtime()
-        
+        st.markdown("**Câmbio (Agora)**")
+        mc1, mc2 = st.columns(2)
         if not df_moedas.empty:
-            st.caption(f"Atualizado: {datetime.now().strftime('%H:%M:%S')}")
-            st.markdown("---")
-            
-            mc1, mc2 = st.columns(2)
             try:
-                # Verifica se as chaves existem
-                if 'USDBRL' in df_moedas.index:
-                    usd = df_moedas.loc['USDBRL']
-                    delta_usd = f"{float(usd['pctChange']):+.2f}%" if 'pctChange' in usd and pd.notna(usd['pctChange']) else None
-                    valor_usd = f"R$ {float(usd['bid']):.2f}" if 'bid' in usd and pd.notna(usd['bid']) else "R$ 0.00"
-                else:
-                    delta_usd = None
-                    valor_usd = "R$ 0.00"
-                
-                if 'EURBRL' in df_moedas.index:
-                    eur = df_moedas.loc['EURBRL']
-                    delta_eur = f"{float(eur['pctChange']):+.2f}%" if 'pctChange' in eur and pd.notna(eur['pctChange']) else None
-                    valor_eur = f"R$ {float(eur['bid']):.2f}" if 'bid' in eur and pd.notna(eur['bid']) else "R$ 0.00"
-                else:
-                    delta_eur = None
-                    valor_eur = "R$ 0.00"
-                
-                with mc1:
-                    st.metric("Dólar (USD/BRL)", valor_usd, delta_usd)
-                
-                with mc2:
-                    st.metric("Euro (EUR/BRL)", valor_eur, delta_eur)
-                    
-            except Exception as e:
-                st.error(f"Erro ao processar cotações: {str(e)}")
-                st.info("Mostrando valores de fallback")
-                # Valores de fallback
-                mc1.metric("Dólar (USD/BRL)", "R$ 5.50", "0.00%")
-                mc2.metric("Euro (EUR/BRL)", "R$ 6.00", "0.00%")
-        else:
-            st.warning("Cotações em tempo real indisponíveis")
-            st.info("Usando valores de referência")
-            mc1, mc2 = st.columns(2)
-            mc1.metric("Dólar (USD/BRL)", "R$ 5.50", "0.00%")
-            mc2.metric("Euro (EUR/BRL)", "R$ 6.00", "0.00%")
+                usd = df_moedas.loc['USDBRL']
+                eur = df_moedas.loc['EURBRL']
+                mc1.metric("Dólar", f"R$ {float(usd['bid']):.2f}", f"{float(usd['pctChange']):.2f}%")
+                mc2.metric("Euro", f"R$ {float(eur['bid']):.2f}", f"{float(eur['pctChange']):.2f}%")
+            except: st.info("Erro moedas")
+        else: st.info("API indisponível")
 
-# ==============================================================================
-# SEÇÃO CONJUNTURA MACRO
-# ==============================================================================
-
+# CONJUNTURA MACRO
 with st.expander("🧩 Conjuntura Macroeconômica (Dados Oficiais Realizados)", expanded=False):
-    st.subheader("🏛️ Indicadores Macroeconômicos Reais")
-    
-    with st.spinner("Carregando dados do BCB..."):
-        macro_result = get_macro_real()
-        macro_dados = macro_result.get("dados", {})
-        ultima_atualizacao = macro_result.get("ultima_atualizacao", "Não disponível")
-        metodologia = macro_result.get("metodologia", {})
-    
+    macro_dados = get_macro_real()
     if macro_dados:
-        st.caption(f"Fonte: Banco Central do Brasil (SGS) • Acumulado últimos 12 meses")
-        st.caption(f"📅 Última atualização: {ultima_atualizacao}")
-        
-        # Informações de metodologia
-        with st.expander("📊 Metodologia dos Cálculos", expanded=False):
-            for nome, metodo in metodologia.items():
-                st.markdown(f"**{nome}**: {metodo}")
-        
-        st.markdown("---")
-        
-        st.markdown("##### 📈 Atividade & Fiscal")
+        st.markdown("##### 🏛️ Atividade & Fiscal (Acum. 12 Meses)")
         c1, c2, c3, c4 = st.columns(4)
+        c1.metric("PIB (Acum. 12m)", f"R$ {macro_dados.get('PIB (R$ Bi)', 0):.2f} Tri")
+        c2.metric("Dív. Líquida Setor Púb.", f"{macro_dados.get('Dívida Líq. (% PIB)', 0):.1f}% PIB")
+        c3.metric("Res. Primário", f"{macro_dados.get('Res. Primário (% PIB)', 0):.2f}% PIB")
+        c4.metric("Res. Nominal", f"{macro_dados.get('Res. Nominal (% PIB)', 0):.2f}% PIB")
         
-        with c1:
-            pib_valor = macro_dados.get('PIB Nominal (R$ Mi)', 0)
-            st.metric("PIB (Acum. 12m)", f"R$ {pib_valor:.2f} Tri", 
-                     help="PIB Nominal acumulado dos últimos 4 trimestres")
-        
-        with c2:
-            divida_valor = macro_dados.get('Dívida Líq. (% PIB)', 0)
-            st.metric("Dív. Líquida Setor Púb.", f"{divida_valor:.1f}% PIB",
-                     help="Dívida Líquida do Setor Público em % do PIB")
-        
-        with c3:
-            primario_valor = macro_dados.get('Res. Primário (% PIB)', 0)
-            st.metric("Res. Primário", f"{primario_valor:.2f}% PIB",
-                     help="Resultado Primário do Setor Público em % do PIB")
-        
-        with c4:
-            nominal_valor = macro_dados.get('Res. Nominal (% PIB)', 0)
-            st.metric("Res. Nominal", f"{nominal_valor:.2f}% PIB",
-                     help="Resultado Nominal do Setor Público em % do PIB (inclui juros)")
-        
-        st.markdown("---")
-        st.markdown("##### 🌍 Setor Externo (Acum. 12 meses)")
+        st.divider()
+        st.markdown("##### 🚢 Setor Externo (Acum. 12 Meses)")
         c5, c6, c7 = st.columns(3)
-        
-        with c5:
-            balanca_valor = macro_dados.get('Balança Com. (US$ Mi)', 0)
-            st.metric("Balança Comercial", f"US$ {balanca_valor:.1f} Bi",
-                     help="Saldo da Balança Comercial (Exportações - Importações)")
-        
-        with c6:
-            trans_valor = macro_dados.get('Trans. Correntes (US$ Mi)', 0)
-            st.metric("Transações Correntes", f"US$ {trans_valor:.1f} Bi",
-                     help="Saldo das Transações Correntes (Conta Corrente)")
-        
-        with c7:
-            idp_valor = macro_dados.get('IDP (US$ Mi)', 0)
-            st.metric("Investimento Direto (IDP)", f"US$ {idp_valor:.1f} Bi",
-                     help="Investimento Direto no País")
+        c5.metric("Balança Comercial", f"US$ {macro_dados.get('Balança Com. (US$ Mi)', 0):.1f} Bi")
+        c6.metric("Transações Correntes", f"US$ {macro_dados.get('Trans. Correntes (US$ Mi)', 0):.1f} Bi")
+        c7.metric("Investimento Direto (IDP)", f"US$ {macro_dados.get('IDP (US$ Mi)', 0):.1f} Bi")
     else:
         st.warning("Não foi possível carregar os dados macroeconômicos do BCB.")
-        st.info("""
-        Possíveis causas:
-        1. API do BCB temporariamente indisponível
-        2. Limite de requisições excedido
-        3. Problemas de conectividade
-        
-        Tente novamente em alguns minutos.
-        """)
 
-# ==============================================================================
-# SEÇÃO CÂMBIO HISTÓRICO
-# ==============================================================================
-
+# CÂMBIO HISTÓRICO
 with st.expander("💸 Histórico de Câmbio (Dólar e Euro desde 1994)", expanded=False):
-    st.subheader("📈 Histórico de Cotações")
-    
-    with st.spinner("Carregando histórico de câmbio..."):
-        df_cambio = get_cambio_historico()
-    
+    df_cambio = get_cambio_historico()
     if not df_cambio.empty:
-        last_date = df_cambio.index[-1] if not df_cambio.empty else None
-        date_str = format_date(last_date) if last_date else "Não disponível"
-        st.caption(f"Último fechamento: {date_str}")
-        
+        st.markdown(f"**Fechamento: {df_cambio.index[-1].strftime('%d/%m/%Y')}**")
         tab_graf, tab_matriz, tab_tabela = st.tabs(["📈 Gráfico", "📅 Matriz de Retornos", "📋 Tabela Diária"])
         
         with tab_graf:
-            if len(df_cambio) > 1:
-                fig_cambio = px.line(
-                    df_cambio, 
-                    x=df_cambio.index, 
-                    y=['Dólar', 'Euro'], 
-                    color_discrete_map={"Dólar": "#00FF7F", "Euro": "#00BFFF"},
-                    labels={'value': 'R$', 'variable': 'Moeda'}
-                )
-                fig_cambio.update_layout(
-                    template="plotly_dark", 
-                    paper_bgcolor='rgba(0,0,0,0)', 
-                    plot_bgcolor='rgba(0,0,0,0)',
-                    font=dict(color="#E0E0E0"), 
-                    hovermode="x unified", 
-                    margin=dict(l=0, r=0, t=40, b=0),
-                    yaxis_title="Cotação (R$)",
-                    xaxis_title=""
-                )
-                st.plotly_chart(fig_cambio, use_container_width=True)
-            else:
-                st.info("Dados insuficientes para gráfico")
-        
-        with tab_matriz:
-            moeda_matriz = st.radio(
-                "Selecione a Moeda:", 
-                ["Dólar", "Euro"], 
-                horizontal=True,
-                key="moeda_matriz"
-            )
+            fig_cambio = px.line(df_cambio, x=df_cambio.index, y=['Dólar', 'Euro'], 
+                                 color_discrete_map={"Dólar": "#00FF7F", "Euro": "#00BFFF"})
+            fig_cambio.update_layout(template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+                                     font=dict(color="#E0E0E0"), hovermode="x unified", margin=dict(l=0, r=0, t=40, b=0))
+            st.plotly_chart(fig_cambio, use_container_width=True)
             
-            if not df_cambio.empty:
-                df_mensal = df_cambio[[moeda_matriz]].resample('ME').last()
-                if len(df_mensal) > 12:  # Precisa de dados suficientes
-                    df_retorno = df_mensal.pct_change() * 100
-                    df_retorno['ano'] = df_retorno.index.year
-                    df_retorno['mes'] = df_retorno.index.month_name().str.slice(0, 3)
-                    
-                    mapa_meses_en_pt = {
-                        'Jan': 'Jan', 'Feb': 'Fev', 'Mar': 'Mar', 'Apr': 'Abr', 
-                        'May': 'Mai', 'Jun': 'Jun', 'Jul': 'Jul', 'Aug': 'Ago', 
-                        'Sep': 'Set', 'Oct': 'Out', 'Nov': 'Nov', 'Dec': 'Dez'
-                    }
-                    df_retorno['mes'] = df_retorno['mes'].map(mapa_meses_en_pt)
-                    
-                    try:
-                        matrix_cambio = df_retorno.pivot(
-                            index='ano', 
-                            columns='mes', 
-                            values=moeda_matriz
-                        )
-                        
-                        colunas_ordem = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 
-                                        'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez']
-                        colunas_ordem = [c for c in colunas_ordem if c in matrix_cambio.columns]
-                        
-                        if colunas_ordem:
-                            matrix_cambio = matrix_cambio[colunas_ordem].sort_index(ascending=False)
-                            st.dataframe(
-                                matrix_cambio.style.background_gradient(
-                                    cmap=cmap_leves, vmin=-5, vmax=5
-                                ).format("{:.2f}%"), 
-                                use_container_width=True, 
-                                height=500
-                            )
-                        else:
-                            st.info("Dados insuficientes para matriz")
-                    except Exception as e:
-                        st.error(f"Erro ao gerar matriz: {str(e)}")
-                else:
-                    st.info("Dados históricos insuficientes para matriz")
-            else:
-                st.info("Aguardando dados de câmbio")
-        
+        with tab_matriz:
+            moeda_matriz = st.radio("Selecione a Moeda:", ["Dólar", "Euro"], horizontal=True)
+            df_mensal = df_cambio[[moeda_matriz]].resample('ME').last()
+            df_retorno = df_mensal.pct_change() * 100
+            df_retorno['ano'] = df_retorno.index.year
+            df_retorno['mes'] = df_retorno.index.month_name().str.slice(0, 3)
+            mapa_meses_en_pt = {'Jan': 'Jan', 'Feb': 'Fev', 'Mar': 'Mar', 'Apr': 'Abr', 'May': 'Mai', 'Jun': 'Jun',
+                                'Jul': 'Jul', 'Aug': 'Ago', 'Sep': 'Set', 'Oct': 'Out', 'Nov': 'Nov', 'Dec': 'Dez'}
+            df_retorno['mes'] = df_retorno['mes'].map(mapa_meses_en_pt)
+            try:
+                matrix_cambio = df_retorno.pivot(index='ano', columns='mes', values=moeda_matriz)
+                colunas_ordem = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez']
+                matrix_cambio = matrix_cambio[colunas_ordem].sort_index(ascending=False)
+                st.dataframe(matrix_cambio.style.background_gradient(cmap=cmap_leves, vmin=-5, vmax=5).format("{:.2f}%"), use_container_width=True, height=500)
+            except: st.info("Matriz incompleta.")
+            
         with tab_tabela:
-            if not df_cambio.empty:
-                df_view = df_cambio.sort_index(ascending=False).reset_index()
-                df_view.rename(columns={'index': 'Data'}, inplace=True)
-                # CORREÇÃO DO ERRO: estava '%d/mm/mv', corrigido para '%d/%m/%Y'
-                df_view['Data'] = df_view['Data'].dt.strftime('%d/%m/%Y')
-                df_view.columns = ['Data', 'Dólar (R$)', 'Euro (R$)']
-                st.dataframe(df_view, use_container_width=True, hide_index=True)
-            else:
-                st.info("Aguardando dados de câmbio")
+            df_view = df_cambio.sort_index(ascending=False).reset_index()
+            df_view['Date'] = df_view['Date'].dt.strftime('%d/%m/%Y')
+            st.dataframe(df_view, use_container_width=True, hide_index=True)
     else:
-        st.warning("Histórico de câmbio indisponível.")
-        st.info("Verificando conexão com Yahoo Finance...")
+        st.warning("Yahoo Finance indisponível.")
 
-# ==============================================================================
-# RODAPÉ
-# ==============================================================================
-st.divider()
-col1, col2, col3 = st.columns(3)
-with col1:
-    st.markdown("**VPL Consultoria Financeira**")
-    st.markdown("*Inteligência para decisões*")
-with col2:
-    st.markdown("**Contato**")
-    st.markdown("contato@vplconsultoria.com.br")
-with col3:
-    st.markdown("**Atualização**")
-    st.markdown(f"Última atualização: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+# PAINEL DO ÍNDICE PRINCIPAL
+st.title(f"📊 Painel: {tipo_indice.split()[0]}")
+if not df.empty:
+    st.markdown(f"**Dados históricos atualizados até:** {df.iloc[0]['data_fmt']}")
+    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+    kpi1.metric("Taxa do Mês", f"{df.iloc[0]['valor']:.2f}%")
+    kpi2.metric("Acumulado 12 Meses", f"{df.iloc[0]['acum_12m']:.2f}%")
+    kpi3.metric("Acumulado Ano (YTD)", f"{df.iloc[0]['acum_ano']:.2f}%")
+    kpi4.metric("Início da Série", df['ano'].min())
 
-st.caption("""
-⚠️ **Aviso**: As informações fornecidas são para fins educacionais e informativos. 
-Não constituem recomendação de investimento. Consulte um profissional qualificado para decisões financeiras.
-""")
+    tab1, tab2, tab3 = st.tabs(["📈 Gráfico", "📅 Matriz de Calor", "📋 Tabela Detalhada"])
+
+    with tab1:
+        df_chart = df.dropna(subset=['acum_12m']).sort_values('data_date')
+        if any(idx in tipo_indice for idx in ["IGP-M", "SELIC", "CDI"]):
+            df_chart = df_chart[df_chart['ano'].astype(int) >= 2000]
+        fig = px.line(df_chart, x='data_date', y='acum_12m', title=f"Histórico 12 Meses - {tipo_indice.split()[0]}")
+        fig.update_traces(line_color=cor_tema, line_width=3)
+        fig.update_layout(template="plotly_dark", paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+                          font=dict(color="#E0E0E0"), hovermode="x unified", margin=dict(l=0, r=0, t=40, b=0))
+        st.plotly_chart(fig, use_container_width=True)
+
+    with tab2:
+        try:
+            matrix = df.pivot(index='ano', columns='mes_nome', values='valor')
+            ordem = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez']
+            matrix = matrix[ordem].sort_index(ascending=False)
+            st.dataframe(matrix.style.background_gradient(cmap=cmap_leves, axis=None, vmin=-1.5, vmax=1.5).format("{:.2f}"), use_container_width=True, height=500)
+        except: st.warning("Matriz indisponível.")
+
+    with tab3:
+        csv_principal = df[['data_fmt', 'valor', 'acum_ano', 'acum_12m']].to_csv(index=False).encode('utf-8')
+        st.download_button("📥 Baixar CSV", csv_principal, f"{tipo_indice.split()[0]}_historico.csv", "text/csv")
+        st.dataframe(df[['data_fmt', 'valor', 'acum_ano', 'acum_12m']], use_container_width=True, hide_index=True)

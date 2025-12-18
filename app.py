@@ -255,7 +255,7 @@ if st.sidebar.button("Calcular", type="primary"):
 # ÁREA SUPERIOR: EXPANDERS
 # ==============================================================================
 
-# 1. BOLETIM FOCUS
+# 1. BOLETIM FOCUS (ATUALIZADO COM PRÓXIMOS ANOS)
 with st.expander("🔭 Clique para ver: Expectativas de Mercado (Focus) & Câmbio Hoje", expanded=False):
     col_top1, col_top2 = st.columns([2, 1])
     
@@ -265,28 +265,58 @@ with st.expander("🔭 Clique para ver: Expectativas de Mercado (Focus) & Câmbi
     
     with col_top1:
         if not df_focus.empty:
+            # Pega a data do relatório mais recente
             ultima_data = df_focus['data_relatorio'].max()
             df_last = df_focus[df_focus['data_relatorio'] == ultima_data]
-            df_view = df_last[df_last['ano_referencia'] == ano_atual]
-            df_pivot = df_view.pivot_table(index='Indicador', columns='ano_referencia', values='previsao', aggfunc='mean')
             
             data_str = pd.to_datetime(ultima_data).strftime('%d/%m/%Y')
-            st.markdown(f"**Boletim Focus ({data_str}) - Fim de {ano_atual}**")
+            st.markdown(f"**Boletim Focus ({data_str})**")
+            
+            # --- PARTE 1: DESTAQUES DO ANO ATUAL ---
+            df_atual = df_last[df_last['ano_referencia'] == ano_atual]
+            # Pivot para pegar valores fáceis
+            pivot_atual = df_atual.pivot_table(index='Indicador', values='previsao', aggfunc='mean')
             
             fc1, fc2, fc3, fc4 = st.columns(4)
-            ipca_f = df_pivot.get(ano_atual, {}).get('IPCA', 0)
-            selic_f = df_pivot.get(ano_atual, {}).get('Selic', 0)
-            pib_f = df_pivot.get(ano_atual, {}).get('PIB Total', 0)
-            cambio_f = df_pivot.get(ano_atual, {}).get('Câmbio', 0)
+            # .get(..., 0) evita erro se o dado não existir
+            ipca_f = pivot_atual.loc['IPCA', 'previsao'] if 'IPCA' in pivot_atual.index else 0
+            selic_f = pivot_atual.loc['Selic', 'previsao'] if 'Selic' in pivot_atual.index else 0
+            pib_f = pivot_atual.loc['PIB Total', 'previsao'] if 'PIB Total' in pivot_atual.index else 0
+            cambio_f = pivot_atual.loc['Câmbio', 'previsao'] if 'Câmbio' in pivot_atual.index else 0
             
-            fc1.metric("IPCA", f"{ipca_f:.2f}%")
-            fc2.metric("Selic", f"{selic_f:.2f}%")
-            fc3.metric("PIB", f"{pib_f:.2f}%")
-            fc4.metric("Dólar", f"R$ {cambio_f:.2f}")
+            fc1.metric(f"IPCA {ano_atual}", f"{ipca_f:.2f}%")
+            fc2.metric(f"Selic {ano_atual}", f"{selic_f:.2f}%")
+            fc3.metric(f"PIB {ano_atual}", f"{pib_f:.2f}%")
+            fc4.metric(f"Dólar {ano_atual}", f"R$ {cambio_f:.2f}")
+            
+            # --- PARTE 2: TABELA PRÓXIMOS ANOS ---
+            st.divider()
+            st.markdown("###### 📅 Projeções para os Próximos Anos")
+            
+            # Filtra ano atual + próximos 2 anos
+            anos_exibir = [ano_atual, ano_atual + 1, ano_atual + 2]
+            df_table = df_last[df_last['ano_referencia'].isin(anos_exibir)].copy()
+            
+            # Cria a tabela Pivotada (Linha=Indicador, Coluna=Ano)
+            df_pivot_multi = df_table.pivot_table(index='Indicador', columns='ano_referencia', values='previsao')
+            
+            # Reordena as linhas para ficar lógico
+            ordem = ['IPCA', 'Selic', 'PIB Total', 'Câmbio']
+            df_pivot_multi = df_pivot_multi.reindex(ordem)
+            
+            # Formatação "Na Mão" para ficar bonito (misturar % e R$)
+            # Criamos um DataFrame de Strings para exibição
+            df_display = df_pivot_multi.copy()
+            for col in df_display.columns:
+                df_display[col] = df_display.apply(lambda x: f"{x[col]:.2f}%" if x.name != 'Câmbio' else f"R$ {x[col]:.2f}", axis=1)
+            
+            # Exibe a tabela limpa
+            st.dataframe(df_display, use_container_width=True)
+
         else:
             st.warning("Focus indisponível.")
 
-    # MOEDAS
+    # MOEDAS (Mantém igual)
     df_moedas = get_currency_realtime()
     with col_top2:
         st.markdown("**Câmbio (Agora)**")

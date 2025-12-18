@@ -401,28 +401,33 @@ with st.expander("🔭 Clique para ver: Expectativas de Mercado (Focus) & Câmbi
 # ==============================================================================
 # NOVO BLOCO: CONJUNTURA MACROECONÔMICA (DADOS REAIS)
 # ==============================================================================
+# ==============================================================================
+# BLOCO ATUALIZADO: CONJUNTURA MACROECONÔMICA (COM DATAS)
+# ==============================================================================
 with st.expander("🧩 Conjuntura Macroeconômica (Dados Oficiais Realizados)", expanded=False):
     st.markdown("Principais indicadores da economia brasileira (Dados mais recentes do Banco Central).")
     
-    macro_dados = get_macro_real()
+    macro = get_macro_real()
     
-    if macro_dados:
+    if macro:
+        # Função auxiliar para pegar Valor e Data com segurança
+        def get_dado(chave):
+            item = macro.get(chave, {'valor': 0, 'data': '--'})
+            return item['valor'], item['data']
+
         # --- LINHA 1: ATIVIDADE E FISCAL ---
         st.markdown("##### 🏛️ Atividade & Fiscal (Acum. 12 Meses)")
         c1, c2, c3, c4 = st.columns(4)
         
-        pib = macro_dados.get('PIB (R$ Bi)', 0)
-        divida = macro_dados.get('Dívida Líq. (% PIB)', 0)
-        primario = macro_dados.get('Res. Primário (% PIB)', 0)
-        nominal = macro_dados.get('Res. Nominal (% PIB)', 0)
+        v_pib, d_pib = get_dado('PIB')
+        v_div, d_div = get_dado('Dívida Líq.')
+        v_pri, d_pri = get_dado('Res. Primário')
+        v_nom, d_nom = get_dado('Res. Nominal')
         
-        # Cores condicionais para o Fiscal (Deficit negativo fica vermelho)
-        cor_prim = "normal" if primario >= 0 else "inverse" 
-        
-        c1.metric("PIB (Acum. 12m)", f"R$ {pib:.2f} Tri")
-        c2.metric("Dív. Líquida Setor Púb.", f"{divida:.1f}% PIB")
-        c3.metric("Res. Primário", f"{primario:.2f}% PIB")
-        c4.metric("Res. Nominal", f"{nominal:.2f}% PIB")
+        c1.metric(f"PIB ({d_pib})", f"R$ {v_pib:.2f} Tri")
+        c2.metric(f"Dív. Líquida ({d_div})", f"{v_div:.1f}% PIB")
+        c3.metric(f"Res. Primário ({d_pri})", f"{v_pri:.2f}% PIB")
+        c4.metric(f"Res. Nominal ({d_nom})", f"{v_nom:.2f}% PIB")
         
         st.divider()
         
@@ -430,13 +435,13 @@ with st.expander("🧩 Conjuntura Macroeconômica (Dados Oficiais Realizados)", 
         st.markdown("##### 🚢 Setor Externo (Acum. 12 Meses)")
         c5, c6, c7 = st.columns(3)
         
-        balanca = macro_dados.get('Balança Com. (US$ Mi)', 0)
-        trans_corr = macro_dados.get('Trans. Correntes (US$ Mi)', 0)
-        idp = macro_dados.get('IDP (US$ Mi)', 0)
+        v_bal, d_bal = get_dado('Balança Com.')
+        v_tra, d_tra = get_dado('Trans. Correntes')
+        v_idp, d_idp = get_dado('IDP')
         
-        c5.metric("Balança Comercial", f"US$ {balanca:.1f} Bi", help="Exportações menos Importações")
-        c6.metric("Transações Correntes", f"US$ {trans_corr:.1f} Bi", help="Saldo de trocas de bens, serviços e rendas com o exterior")
-        c7.metric("Investimento Direto (IDP)", f"US$ {idp:.1f} Bi", help="Entrada líquida de capitais para investimento produtivo")
+        c5.metric(f"Balança Com. ({d_bal})", f"US$ {v_bal:.1f} Bi")
+        c6.metric(f"Trans. Correntes ({d_tra})", f"US$ {v_tra:.1f} Bi")
+        c7.metric(f"Inv. Direto - IDP ({d_idp})", f"US$ {v_idp:.1f} Bi")
         
     else:
         st.warning("Não foi possível carregar os dados macroeconômicos do BCB.")

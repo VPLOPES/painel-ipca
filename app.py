@@ -295,21 +295,7 @@ def carregar_dados_sidra(codigo_tabela: str, codigo_variavel: str) -> pd.DataFra
         return processar_dataframe(df)
     except Exception as e:
         logger.error(f"Erro SIDRA {codigo_tabela}: {e}")
-        return pd.DataFrame()        
-
-def carregar_dados_focus() -> Tuple[pd.DataFrame, str, str]:
-    """Wrapper que decide entre API Otimizada e Fallback"""
-    # 1. Tenta a API Otimizada
-    df_api = carregar_focus_otimizado()
-    
-    if not df_api.empty:
-        StatusFonte.atualizar('focus', 'automático', 'BCB/Olinda (Otimizado)')
-        return df_api, 'automático', 'BCB/Olinda'
-    
-    # 2. Se falhar, usa o fallback manual
-    df_manual = criar_fallback_focus()
-    StatusFonte.atualizar('focus', 'manual', 'Base VPL (Manual)')
-    return df_manual, 'manual', 'Base VPL'
+        return pd.DataFrame()
 
 @st.cache_data(ttl=Config.TTL_MEDIUM)
 @log_errors
@@ -451,35 +437,47 @@ def criar_fallback_focus() -> pd.DataFrame:
 
 @st.cache_data(ttl=Config.TTL_SHORT)
 def carregar_focus_otimizado() -> pd.DataFrame:
-    """Busca APENAS o último relatório disponível do Focus"""
+    """Busca Focus com tratamento de SSL e Headers"""
+    # Desabilita avisos de SSL inseguro (Necessário para APIs do Gov)
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    
     try:
-        # 1. Descobrir qual a data do último relatório disponível
         url_base = "https://olinda.bcb.gov.br/olinda/servico/Expectativas/versao/v1/odata/ExpectativasMercadoAnuais"
         
-        # Pega apenas a data mais recente (top=1 ordenado por data desc)
+        # Headers e Verify False são essenciais para o BCB
         query_data = "?$top=1&$select=Data&$orderby=Data desc&$format=json"
-        resp_data = requests.get(url_base + query_data, timeout=5)
+        
+        # 1. Pega data
+        resp_data = requests.get(
+            url_base + query_data, 
+            headers=Config.HEADERS, 
+            timeout=5, 
+            verify=False
+        )
+        resp_data.raise_for_status()
         ultima_data = resp_data.json()['value'][0]['Data']
         
-        # 2. Baixar apenas os dados dessa data específica
-        # Filtra pela data E pelos indicadores que queremos para economizar banda
-        indicadores_str = "'IPCA','Selic','PIB Total','Câmbio','IGP-M'" # Adicione os outros aqui
+        # 2. Pega dados filtrados
+        indicadores_str = "'IPCA','Selic','PIB Total','Câmbio','IGP-M'"
         query_final = (
             f"?$filter=Data eq '{ultima_data}' and Indicador in ({indicadores_str})"
             f"&$select=Indicador,DataReferencia,Mediana"
             f"&$format=json"
         )
         
-        response = requests.get(url_base + query_final, timeout=10)
+        response = requests.get(
+            url_base + query_final, 
+            headers=Config.HEADERS, 
+            timeout=10, 
+            verify=False
+        )
         dados = response.json()['value']
         
         df = pd.DataFrame(dados)
-        
-        # Tratamento (similar ao seu, mas agora o DF é leve)
         df = df.rename(columns={'DataReferencia': 'ano_referencia', 'Mediana': 'previsao'})
         df['ano_referencia'] = df['ano_referencia'].astype(int)
         
-        # Filtra anos futuros relevantes (ex: ano atual + 2)
         ano_atual = datetime.now().year
         df = df[df['ano_referencia'].isin([ano_atual, ano_atual + 1, ano_atual + 2])]
         
@@ -487,15 +485,17 @@ def carregar_focus_otimizado() -> pd.DataFrame:
         
     except Exception as e:
         logger.error(f"Erro Focus Otimizado: {e}")
+        print(f"ERRO FOCUS: {str(e)}") # Log visível
         return pd.DataFrame()
         
 @st.cache_data(ttl=60)
 @log_errors
 def carregar_cotacoes_tempo_real() -> Tuple[pd.DataFrame, str, str]:
-    """Carrega cotações via AwesomeAPI (Muito mais rápido que Yahoo)"""
+    """Carrega cotações via AwesomeAPI com Headers Corretos"""
     url = "https://economia.awesomeapi.com.br/last/USD-BRL,EUR-BRL"
     try:
-        response = requests.get(url, timeout=5)
+        # IMPORTANTE: Passar headers para não ser bloqueado
+        response = requests.get(url, headers=Config.HEADERS, timeout=5)
         response.raise_for_status()
         data = response.json()
         
@@ -516,7 +516,10 @@ def carregar_cotacoes_tempo_real() -> Tuple[pd.DataFrame, str, str]:
         
     except Exception as e:
         logger.error(f"Erro AwesomeAPI: {e}")
-        # Fallback manual se a API falhar
+        # Dica de Debug: Mostra o erro no log do Streamlit Cloud
+        print(f"ERRO CAMBIO: {str(e)}")
+        
+        # Fallback manual
         dados_manual = {
             'Dólar': {'cotacao': 5.80, 'variacao': 0.0, 'atualizado': 'Manual'},
             'Euro': {'cotacao': 6.10, 'variacao': 0.0, 'atualizado': 'Manual'}

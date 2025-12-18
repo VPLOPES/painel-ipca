@@ -163,15 +163,15 @@ def processar_dataframe_comum(df):
     df['acum_12m'] = (df['fator'].rolling(window=12).apply(np.prod, raw=True) - 1) * 100
     return df.sort_values('data_date', ascending=False)
 
-# 7. Dados Macroeconômicos Reais (Versão Robusta/Blindada)
+# 7. Dados Macroeconômicos Reais (Acumulado do ANO / YTD)
 @st.cache_data(ttl=3600)
 def get_macro_real():
     # Códigos das Séries do Banco Central (SGS)
     series = {
-        'PIB': 4382,           # PIB Acum. 12 meses (R$ Mi)
-        'Dívida Líq.': 4513,   # Dívida Líq. Setor Público (% PIB)
-        'Res. Primário': 5362, # NFSP Primário (% PIB)
-        'Res. Nominal': 5360,  # NFSP Nominal (% PIB)
+        'PIB': 4382,           # PIB Acum. 12 meses (R$ Mi) - Mantemos 12m para referência de tamanho
+        'Dívida Líq.': 4513,   # Dívida Líq. (% PIB) - Estoque (não acumula)
+        'Res. Primário': 5793, # NFSP Primário (Fluxo Mensal R$ Mi) <- MUDOU
+        'Res. Nominal': 5811,  # NFSP Nominal (Fluxo Mensal R$ Mi) <- MUDOU
         'Balança Com.': 22707, # Saldo Comercial (US$ Mi)
         'Trans. Correntes': 22724, # Saldo Trans. Correntes (US$ Mi)
         'IDP': 22885           # IDP (US$ Mi)
@@ -185,38 +185,50 @@ def get_macro_real():
     mapa_meses = {'01':'jan', '02':'fev', '03':'mar', '04':'abr', '05':'mai', '06':'jun',
                   '07':'jul', '08':'ago', '09':'set', '10':'out', '11':'nov', '12':'dez'}
     
-    # Loop Blindado: Se um falhar, os outros continuam
     for nome, codigo in series.items():
         try:
-            url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo}/dados/ultimos/13?formato=json"
-            # Timeout aumentado para 10s e verify=False para evitar erro de SSL
+            # Baixamos mais dados (24 meses) para garantir que temos o ano atual inteiro
+            url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo}/dados/ultimos/24?formato=json"
             resp = requests.get(url, headers=headers, verify=False, timeout=10)
-            resp.raise_for_status() # Garante que baixou (Status 200)
+            resp.raise_for_status()
             
             df = pd.DataFrame(resp.json())
             df['valor'] = pd.to_numeric(df['valor'])
+            df['data_dt'] = pd.to_datetime(df['data'], format='%d/%m/%Y')
             
             # --- CAPTURA DATA ---
-            data_raw = df['data'].iloc[-1]
+            ultimo_registro = df.iloc[-1]
+            ano_atual_dado = ultimo_registro['data_dt'].year
+            data_raw = ultimo_registro['data']
             dia, mes, ano = data_raw.split('/')
             data_curta = f"{mapa_meses[mes]}/{ano[2:]}"
             
-            # --- LÓGICA DE VALORES ---
+            # --- LÓGICA DE CÁLCULO (YTD) ---
             valor = 0
+            
+            # PIB e Dívida mantemos a lógica padrão (Estoque/12m)
             if nome == 'PIB':
-                valor = df['valor'].iloc[-1] / 1_000_000 # R$ Milhões -> Trilhões
-            elif nome in ['Balança Com.', 'Trans. Correntes', 'IDP']:
-                valor = df['valor'].iloc[-12:].sum() / 1_000 # Soma 12m e converte para US$ Bi
-            elif 'Primário' in nome or 'Nominal' in nome:
-                valor = df['valor'].iloc[-1] * -1 # Inverte sinal (BC usa + para déficit)
-            else:
-                valor = df['valor'].iloc[-1] # Dívida (% PIB) direto
+                valor = df['valor'].iloc[-1] / 1_000_000 # R$ Trilhões
+            elif nome == 'Dívida Líq.':
+                valor = df['valor'].iloc[-1] # % PIB
                 
-            resultados[nome] = {'valor': valor, 'data': data_curta}
+            else:
+                # LÓGICA YTD (Year to Date) para Fluxos (Fiscal e Externo)
+                # Filtra apenas os dados do ano do último registro
+                df_ano = df[df['data_dt'].dt.year == ano_atual_dado]
+                soma_ano = df_ano['valor'].sum()
+                
+                if 'Primário' in nome or 'Nominal' in nome:
+                    # Fiscal: R$ Milhões -> R$ Bilhões (Invertendo sinal de NFSP)
+                    valor = (soma_ano * -1) / 1_000 
+                else:
+                    # Externo: US$ Milhões -> US$ Bilhões
+                    valor = soma_ano / 1_000
+                
+            resultados[nome] = {'valor': valor, 'data': data_curta, 'ano_ref': ano_atual_dado}
             
         except Exception as e:
-            print(f"Erro ao baixar indicador {nome}: {e}")
-            # Não faz nada, apenas pula este indicador e tenta o próximo
+            # print(f"Erro {nome}: {e}")
             continue
             
     return resultados
@@ -408,10 +420,7 @@ with st.expander("🔭 Clique para ver: Expectativas de Mercado (Focus) & Câmbi
             st.info("API indisponível")
 
 # ==============================================================================
-# NOVO BLOCO: CONJUNTURA MACROECONÔMICA (DADOS REAIS)
-# ==============================================================================
-# ==============================================================================
-# BLOCO ATUALIZADO: CONJUNTURA MACROECONÔMICA (COM DATAS)
+# BLOCO ATUALIZADO: CONJUNTURA MACRO (VISÃO YTD - ACUMULADO ANO)
 # ==============================================================================
 with st.expander("🧩 Conjuntura Macroeconômica (Dados Oficiais Realizados)", expanded=False):
     st.markdown("Principais indicadores da economia brasileira (Dados mais recentes do Banco Central).")
@@ -419,41 +428,44 @@ with st.expander("🧩 Conjuntura Macroeconômica (Dados Oficiais Realizados)", 
     macro = get_macro_real()
     
     if macro:
-        # Função auxiliar para pegar Valor e Data com segurança
         def get_dado(chave):
-            item = macro.get(chave, {'valor': 0, 'data': '--'})
-            return item['valor'], item['data']
+            # Retorna valor, data e o ano de referência
+            item = macro.get(chave, {'valor': 0, 'data': '--', 'ano_ref': ''})
+            return item['valor'], item['data'], item['ano_ref']
 
         # --- LINHA 1: ATIVIDADE E FISCAL ---
-        st.markdown("##### 🏛️ Atividade & Fiscal (Acum. 12 Meses)")
+        # PIB e Dívida seguem padrão global. Fiscal agora é YTD.
+        st.markdown("##### 🏛️ Atividade & Fiscal")
         c1, c2, c3, c4 = st.columns(4)
         
-        v_pib, d_pib = get_dado('PIB')
-        v_div, d_div = get_dado('Dívida Líq.')
-        v_pri, d_pri = get_dado('Res. Primário')
-        v_nom, d_nom = get_dado('Res. Nominal')
+        v_pib, d_pib, _ = get_dado('PIB')
+        v_div, d_div, _ = get_dado('Dívida Líq.')
+        v_pri, d_pri, a_pri = get_dado('Res. Primário')
+        v_nom, d_nom, a_nom = get_dado('Res. Nominal')
         
-        c1.metric(f"PIB ({d_pib})", f"R$ {v_pib:.2f} Tri")
-        c2.metric(f"Dív. Líquida ({d_div})", f"{v_div:.1f}% PIB")
-        c3.metric(f"Res. Primário ({d_pri})", f"{v_pri:.2f}% PIB")
-        c4.metric(f"Res. Nominal ({d_nom})", f"{v_nom:.2f}% PIB")
+        c1.metric(f"PIB 12m ({d_pib})", f"R$ {v_pib:.2f} Tri", help="Soma dos últimos 12 meses")
+        c2.metric(f"Dív. Líquida ({d_div})", f"{v_div:.1f}% PIB", help="Estoque da dívida total")
+        
+        # Fiscal agora mostra o ANO no título e valor em R$
+        c3.metric(f"Primário (YTD {a_pri})", f"R$ {v_pri:.1f} Bi", help=f"Acumulado de Jan/{a_pri} até {d_pri}")
+        c4.metric(f"Nominal (YTD {a_pri})", f"R$ {v_nom:.1f} Bi", help=f"Acumulado de Jan/{a_pri} até {d_nom}")
         
         st.divider()
         
-        # --- LINHA 2: SETOR EXTERNO ---
-        st.markdown("##### 🚢 Setor Externo (Acum. 12 Meses)")
+        # --- LINHA 2: SETOR EXTERNO (TUDO YTD) ---
+        st.markdown(f"##### 🚢 Setor Externo (Acumulado do Ano)")
         c5, c6, c7 = st.columns(3)
         
-        v_bal, d_bal = get_dado('Balança Com.')
-        v_tra, d_tra = get_dado('Trans. Correntes')
-        v_idp, d_idp = get_dado('IDP')
+        v_bal, d_bal, a_bal = get_dado('Balança Com.')
+        v_tra, d_tra, a_tra = get_dado('Trans. Correntes')
+        v_idp, d_idp, a_idp = get_dado('IDP')
         
-        c5.metric(f"Balança Com. ({d_bal})", f"US$ {v_bal:.1f} Bi")
-        c6.metric(f"Trans. Correntes ({d_tra})", f"US$ {v_tra:.1f} Bi")
-        c7.metric(f"Inv. Direto - IDP ({d_idp})", f"US$ {v_idp:.1f} Bi")
+        c5.metric(f"Balança Com. ({a_bal})", f"US$ {v_bal:.1f} Bi", help=f"Saldo acumulado em {a_bal} (até {d_bal})")
+        c6.metric(f"Trans. Correntes ({a_tra})", f"US$ {v_tra:.1f} Bi", help=f"Saldo acumulado em {a_tra} (até {d_tra})")
+        c7.metric(f"Inv. Direto - IDP ({a_idp})", f"US$ {v_idp:.1f} Bi", help=f"Entradas líquidas em {a_idp} (até {d_idp})")
         
     else:
-        st.warning("Não foi possível carregar os dados macroeconômicos do BCB.")
+        st.warning("Aguardando carregamento dos dados macroeconômicos...")
 
 # 2. HISTÓRICO DE CÂMBIO (COMPLETO)
 with st.expander("💸 Histórico de Câmbio (Dólar e Euro desde 1994)", expanded=False):

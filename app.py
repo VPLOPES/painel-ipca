@@ -20,7 +20,23 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- CLASSES DE UTILIDADE E CONFIG ---
+# Estilo CSS Personalizado
+st.markdown("""
+<style>
+    .metric-card {
+        background-color: #f8f9fa;
+        border: 1px solid #dee2e6;
+        padding: 15px;
+        border-radius: 8px;
+        margin-bottom: 10px;
+    }
+    .stBadge {
+        font-family: 'Source Sans Pro', sans-serif;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# --- CONFIGURAÇÕES GERAIS ---
 class Config:
     """Configurações visuais e constantes"""
     CORES = {
@@ -35,10 +51,11 @@ class Config:
     }
     HEADERS = {'User-Agent': 'Mozilla/5.0'}
 
-# Paleta para Matrizes
+# Paleta para Matrizes (Verde/Branco/Vermelho Suave)
 cores_leves = ["#FFB3B3", "#FFFFFF", "#B3FFB3"]
 cmap_leves = LinearSegmentedColormap.from_list("pastel_rdylgn", cores_leves)
 
+# --- SISTEMA DE STATUS (BADGES) ---
 class StatusFonte:
     """Gerencia os badges de status da fonte (Singleton no Session State)"""
     if 'status_dict' not in st.session_state:
@@ -66,7 +83,7 @@ class StatusFonte:
         </div>
         """
 
-# --- FALLBACKS (DADOS DE SEGURANÇA) ---
+# --- DADOS DE FALLBACK (SEGURANÇA) ---
 def get_fallback_focus():
     """Dados manuais caso a API do Focus falhe"""
     dados = [
@@ -74,12 +91,15 @@ def get_fallback_focus():
         {'Indicador': 'Selic', 'ano_referencia': 2025, 'previsao': 9.00},
         {'Indicador': 'PIB Total', 'ano_referencia': 2025, 'previsao': 2.00},
         {'Indicador': 'Câmbio', 'ano_referencia': 2025, 'previsao': 5.40},
-        # Adicione mais conforme necessário para robustez
+        {'Indicador': 'IPCA', 'ano_referencia': 2026, 'previsao': 3.50},
+        {'Indicador': 'Selic', 'ano_referencia': 2026, 'previsao': 8.50},
+        {'Indicador': 'Câmbio', 'ano_referencia': 2026, 'previsao': 5.45},
+        {'Indicador': 'PIB Total', 'ano_referencia': 2026, 'previsao': 2.00},
     ]
     return pd.DataFrame(dados)
 
 def get_fallback_macro():
-    """Dados manuais de macroeconomia"""
+    """Dados manuais de macroeconomia para caso de erro"""
     return {
         'PIB (R$ Bi)': 11000.00, 'Dívida Líq. (% PIB)': 62.5,
         'Res. Primário (% PIB)': -0.6, 'Res. Nominal (% PIB)': -7.5,
@@ -87,7 +107,7 @@ def get_fallback_macro():
         'IDP (US$ Mi)': 65000
     }
 
-# --- PROCESSAMENTO ---
+# --- PROCESSAMENTO COMUM ---
 def processar_dataframe_comum(df):
     if df.empty: return df
     df = df.sort_values('data_date', ascending=True)
@@ -128,11 +148,11 @@ def calcular_correcao(df, valor, data_ini_code, data_fim_code):
         'is_reverso': is_reverso
     }, None
 
-# --- FUNÇÕES DE CARGA (BLINDADAS) ---
+# --- FUNÇÕES DE CARGA DE DADOS (COM ROBUSTEZ) ---
 
 @st.cache_data(ttl=3600)
 def get_focus_data_pro():
-    """Busca Focus com correção de duplicatas e status"""
+    """Busca Focus com correção de duplicatas, tratamento de erro e status"""
     try:
         url = "https://olinda.bcb.gov.br/olinda/servico/Expectativas/versao/v1/odata/ExpectativasMercadoAnuais?$top=5000&$orderby=Data%20desc&$format=json"
         response = requests.get(url, headers=Config.HEADERS, verify=False, timeout=6)
@@ -165,7 +185,7 @@ def get_focus_data_pro():
 
 @st.cache_data(ttl=3600)
 def get_macro_real_pro():
-    """Busca dados macro com Fallback"""
+    """Busca dados macro com Fallback e Status"""
     series = {
         'PIB (R$ Bi)': 4382, 'Dívida Líq. (% PIB)': 4513,
         'Res. Primário (% PIB)': 5362, 'Res. Nominal (% PIB)': 5360,
@@ -199,6 +219,7 @@ def get_macro_real_pro():
 
 @st.cache_data(ttl=86400)
 def get_cambio_historico_pro():
+    """Busca histórico de câmbio com Status"""
     try:
         df = yf.download(["USDBRL=X", "EURBRL=X"], start="1994-07-01", progress=False)
         if df.empty: raise Exception("Vazio")
@@ -218,6 +239,22 @@ def get_cambio_historico_pro():
         StatusFonte.set('cambio_hist', 'erro', 'Indisponível')
         return pd.DataFrame()
 
+@st.cache_data(ttl=300)
+def get_cotacao_realtime():
+    """Busca cotação tempo real com Status"""
+    try:
+        url = "https://economia.awesomeapi.com.br/last/USD-BRL,EUR-BRL"
+        resp = requests.get(url, timeout=5)
+        data = resp.json()
+        df = pd.DataFrame([
+            {'moeda': 'Dólar', 'bid': float(data['USDBRL']['bid']), 'pct': float(data['USDBRL']['pctChange'])},
+            {'moeda': 'Euro', 'bid': float(data['EURBRL']['bid']), 'pct': float(data['EURBRL']['pctChange'])}
+        ]).set_index('moeda')
+        return df
+    except:
+        return pd.DataFrame()
+
+# Wrappers para Indicador Principal
 @st.cache_data
 def get_indicador_principal(tipo):
     try:
@@ -264,25 +301,11 @@ def get_bcb_wrapper(codigo, nome_fonte):
         StatusFonte.set('principal', 'erro', 'Falha na Carga')
         return pd.DataFrame()
 
-@st.cache_data(ttl=300)
-def get_cotacao_realtime():
-    try:
-        url = "https://economia.awesomeapi.com.br/last/USD-BRL,EUR-BRL"
-        resp = requests.get(url, timeout=5)
-        data = resp.json()
-        df = pd.DataFrame([
-            {'moeda': 'Dólar', 'bid': float(data['USDBRL']['bid']), 'pct': float(data['USDBRL']['pctChange'])},
-            {'moeda': 'Euro', 'bid': float(data['EURBRL']['bid']), 'pct': float(data['EURBRL']['pctChange'])}
-        ]).set_index('moeda')
-        return df
-    except:
-        return pd.DataFrame()
-
 # ==============================================================================
 # INTERFACE PRINCIPAL (MAIN)
 # ==============================================================================
 def main():
-    # Header
+    # --- SIDEBAR ---
     try:
         st.sidebar.image("Logo_VPL_Consultoria_Financeira.png", use_container_width=True)
     except:
@@ -294,15 +317,15 @@ def main():
         ["IPCA (Inflação Oficial)", "INPC (Salários)", "IGP-M (Aluguéis)", "SELIC (Taxa Básica)", "CDI (Investimentos)"]
     )
 
-    # Cores do Tema
+    # Definição de Cores do Tema
     if "IPCA" in tipo_indice: cor_tema = Config.CORES['tema_azul']
     elif "INPC" in tipo_indice: cor_tema = Config.CORES['tema_verde']
     elif "IGP-M" in tipo_indice: cor_tema = Config.CORES['tema_vermelho']
     elif "SELIC" in tipo_indice: cor_tema = Config.CORES['tema_dourado']
     else: cor_tema = Config.CORES['tema_branco']
 
-    # Carga de Dados
-    with st.spinner("Sincronizando dados..."):
+    # --- CARGA DE DADOS ---
+    with st.spinner("Sincronizando dados com fontes oficiais..."):
         df_ind = get_indicador_principal(tipo_indice)
         df_focus = get_focus_data_pro()
         dados_macro = get_macro_real_pro()
@@ -310,7 +333,7 @@ def main():
         df_cotacoes = get_cotacao_realtime()
 
     if df_ind.empty:
-        st.error("Falha crítica ao carregar o indicador principal.")
+        st.error("Falha crítica ao carregar o indicador principal. Verifique sua conexão.")
         st.stop()
 
     # --- CALCULADORA NA SIDEBAR ---
@@ -328,7 +351,7 @@ def main():
     
     c3, c4 = st.sidebar.columns(2)
     mes_fim = c3.selectbox("Fim", lista_meses, index=11)
-    ano_fim = c4.selectbox("Ano ", lista_anos, index=0) # Espaço extra para diferenciar key
+    ano_fim = c4.selectbox("Ano ", lista_anos, index=0)
     
     if st.sidebar.button("Calcular Correção", type="primary", use_container_width=True):
         code_ini = f"{ano_ini}{mapa_meses[mes_ini]}"
@@ -366,7 +389,20 @@ def main():
                     cols = [ano, ano+1, ano+2]
                     df_tab = df_focus[df_focus['ano_referencia'].isin(cols)]
                     df_pivot = df_tab.pivot(index='Indicador', columns='ano_referencia', values='previsao')
-                    st.dataframe(df_pivot.style.format("{:.2f}"), use_container_width=True, height=300)
+                    
+                    # Formatação condicional
+                    df_display = df_pivot.copy()
+                    for col in df_display.columns:
+                        def fmt(row):
+                            val = row[col]
+                            nome = row.name
+                            if pd.isna(val): return "-"
+                            if 'Câmbio' in nome: return f"R$ {val:.2f}"
+                            elif any(x in nome for x in ['comercial', 'Conta corrente', 'Investimento']): return f"US$ {val:.2f} B"
+                            else: return f"{val:.2f}%"
+                        df_display[col] = df_display.apply(fmt, axis=1)
+
+                    st.dataframe(df_display, use_container_width=True, height=300)
                 except: st.error("Erro ao renderizar Focus")
         
         with c_cambio:
@@ -380,7 +416,9 @@ def main():
 
     # --- PAINEL 2: MACROECONOMIA ---
     with st.expander("🧩 Conjuntura Macroeconômica (Realizado)", expanded=False):
-        st.markdown(StatusFonte.get_badge('macro'), unsafe_allow_html=True)
+        col_tit, col_sts = st.columns([3, 1])
+        col_sts.markdown(StatusFonte.get_badge('macro'), unsafe_allow_html=True)
+        
         if dados_macro:
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("PIB (12m)", f"R$ {dados_macro.get('PIB (R$ Bi)',0):.2f} T")
@@ -392,9 +430,9 @@ def main():
     with st.expander("💸 Histórico de Câmbio (Longo Prazo)", expanded=False):
         st.markdown(StatusFonte.get_badge('cambio_hist'), unsafe_allow_html=True)
         if not df_cambio_hist.empty:
-            tab_g, tab_m = st.tabs(["Gráfico", "Matriz Mensal"])
+            tab_g, tab_m, tab_t = st.tabs(["Gráfico", "Matriz Mensal", "Tabela"])
             with tab_g:
-                fig_c = px.line(df_cambio_hist, x=df_cambio_hist.index, y=['Dólar', 'Euro'])
+                fig_c = px.line(df_cambio_hist, x=df_cambio_hist.index, y=['Dólar', 'Euro'], color_discrete_map={"Dólar": "#00FF7F", "Euro": "#00BFFF"})
                 fig_c.update_layout(template="plotly_dark", height=350, margin=dict(l=0,r=0,t=20,b=0))
                 st.plotly_chart(fig_c, use_container_width=True)
             with tab_m:
@@ -408,6 +446,10 @@ def main():
                     mat = mat[meses].sort_index(ascending=False)
                     st.dataframe(mat.style.background_gradient(cmap=cmap_leves, vmin=-5, vmax=5).format("{:.2f}"), use_container_width=True)
                 except: st.info("Matriz indisponível")
+            with tab_t:
+                csv = df_cambio_hist.to_csv().encode('utf-8')
+                st.download_button("📥 Baixar CSV Câmbio", csv, "cambio_full.csv", "text/csv")
+                st.dataframe(df_cambio_hist.sort_index(ascending=False).head(100), use_container_width=True)
 
     # --- PAINEL 4: INDICADOR PRINCIPAL ---
     st.divider()
@@ -423,7 +465,7 @@ def main():
         i3.metric("Acum. Ano", f"{ult['acum_ano']:.2f}%")
         i4.metric("Início da Série", df_ind['ano'].min())
 
-        tab_main1, tab_main2 = st.tabs(["Gráfico de Tendência", "Dados Históricos"])
+        tab_main1, tab_main2, tab_main3 = st.tabs(["Gráfico de Tendência", "Matriz de Calor", "Dados Históricos"])
         
         with tab_main1:
             df_chart = df_ind.head(60) # Últimos 5 anos
@@ -433,6 +475,16 @@ def main():
             st.plotly_chart(fig, use_container_width=True)
             
         with tab_main2:
+            try:
+                matrix = df_ind.pivot(index='ano', columns='mes_nome', values='valor')
+                ordem = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez']
+                matrix = matrix[ordem].sort_index(ascending=False)
+                st.dataframe(matrix.style.background_gradient(cmap=cmap_leves, axis=None, vmin=-1.5, vmax=1.5).format("{:.2f}"), use_container_width=True)
+            except: st.warning("Matriz indisponível.")
+            
+        with tab_main3:
+            csv_ind = df_ind.to_csv(index=False).encode('utf-8')
+            st.download_button("📥 Baixar CSV Indicador", csv_ind, f"{tipo_indice.split()[0]}.csv", "text/csv")
             st.dataframe(df_ind[['data_fmt', 'valor', 'acum_ano', 'acum_12m']], use_container_width=True)
 
 if __name__ == "__main__":

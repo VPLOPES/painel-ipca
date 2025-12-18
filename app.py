@@ -163,25 +163,25 @@ def processar_dataframe_comum(df):
     df['acum_12m'] = (df['fator'].rolling(window=12).apply(np.prod, raw=True) - 1) * 100
     return df.sort_values('data_date', ascending=False)
 
-# 7. NOVO: Dados Macroeconômicos Reais (SGS - Banco Central)
+# 7. NOVO: Dados Macroeconômicos Reais (SGS - Banco Central) - CORRIGIDO
 @st.cache_data(ttl=3600)
 def get_macro_real():
-    # Dicionário com os códigos do SGS/BCB
-    # PIB: 4380 (Acum 12m R$ mi)
-    # Dívida Líq: 4478 (% PIB)
-    # Primário: 5026 (% PIB Acum 12m)
-    # Nominal: 5030 (% PIB Acum 12m)
-    # Balança: 22709 (Mensal US$ mi) -> Precisa somar 12m
-    # Trans. Correntes: 22708 (Mensal US$ mi) -> Precisa somar 12m
-    # IDP: 22885 (Mensal US$ mi) -> Precisa somar 12m
+    # NOVOS CÓDIGOS CORRETOS:
+    # PIB: 4382 (PIB Acumulado 12 meses - R$ milhões)
+    # Dívida Líq: 4513 (DLSP % PIB)
+    # Primário: 5362 (NFSP Primário % PIB - Acum 12m). Nota: Positivo é Deficit.
+    # Nominal: 5360 (NFSP Nominal % PIB - Acum 12m). Nota: Positivo é Deficit.
+    # Balança: 22707 (Saldo Comercial - US$ Milhões)
+    # Trans. Correntes: 22724 (Saldo Trans. Correntes - US$ Milhões)
+    # IDP: 22885 (IDP Ingresso Líquido - US$ Milhões)
     
     series = {
-        'PIB (R$ Bi)': 4380,
-        'Dívida Líq. (% PIB)': 4478,
-        'Res. Primário (% PIB)': 5026,
-        'Res. Nominal (% PIB)': 5030,
-        'Balança Com. (US$ Mi)': 22709,
-        'Trans. Correntes (US$ Mi)': 22708,
+        'PIB (R$ Bi)': 4382,
+        'Dívida Líq. (% PIB)': 4513,
+        'Res. Primário (% PIB)': 5362,
+        'Res. Nominal (% PIB)': 5360,
+        'Balança Com. (US$ Mi)': 22707,
+        'Trans. Correntes (US$ Mi)': 22724,
         'IDP (US$ Mi)': 22885
     }
     
@@ -190,26 +190,34 @@ def get_macro_real():
     
     try:
         for nome, codigo in series.items():
+            # Baixa os últimos 13 meses para garantir janela de 1 ano
             url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo}/dados/ultimos/13?formato=json"
             resp = requests.get(url, headers=headers, verify=False, timeout=5)
             df = pd.DataFrame(resp.json())
             df['valor'] = pd.to_numeric(df['valor'])
             
-            # Lógica Específica
-            if nome in ['Balança Com. (US$ Mi)', 'Trans. Correntes (US$ Mi)', 'IDP (US$ Mi)']:
-                # Soma os últimos 12 meses para anualizar
-                valor_final = df['valor'].iloc[-12:].sum() / 1000 # Converte para Bilhões
-            elif nome == 'PIB (R$ Bi)':
-                valor_final = df['valor'].iloc[-1] / 1000000 # Converte de Milhões para Trilhões
+            if nome == 'PIB (R$ Bi)':
+                # Pega o último valor acumulado e converte para Trilhões
+                valor_final = df['valor'].iloc[-1] / 1_000_000 
+                
+            elif 'Balança' in nome or 'Trans.' in nome or 'IDP' in nome:
+                # Setor Externo: Soma os últimos 12 meses (Fluxo Anual)
+                # Converte de Milhões para Bilhões
+                valor_final = df['valor'].iloc[-12:].sum() / 1_000
+                
+            elif 'Primário' in nome or 'Nominal' in nome:
+                # Fiscal: Inverte o sinal (BC divulga NFSP onde + é déficit. Queremos Resultado onde + é superávit)
+                valor_final = df['valor'].iloc[-1] * -1
+                
             else:
-                # Pegamos o último dado disponível (Dívida, Resultados Fiscais)
+                # Dívida (já está em % e é estoque, pega o último)
                 valor_final = df['valor'].iloc[-1]
                 
             resultados[nome] = valor_final
             
         return resultados
     except Exception as e:
-        print(f"Erro Macro Real: {e}")
+        # print(f"Erro Macro Real: {e}")
         return {}
 
 # --- CÁLCULO ---

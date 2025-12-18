@@ -263,7 +263,7 @@ if st.sidebar.button("Calcular", type="primary"):
 # ÁREA SUPERIOR: EXPANDERS
 # ==============================================================================
 
-# 1. BOLETIM FOCUS (ATUALIZADO COM PRÓXIMOS ANOS)
+# 1. BOLETIM FOCUS (COM NOVOS INDICADORES MACRO)
 with st.expander("🔭 Clique para ver: Expectativas de Mercado (Focus) & Câmbio Hoje", expanded=False):
     col_top1, col_top2 = st.columns([2, 1])
     
@@ -273,52 +273,61 @@ with st.expander("🔭 Clique para ver: Expectativas de Mercado (Focus) & Câmbi
     
     with col_top1:
         if not df_focus.empty:
-            # Pega a data do relatório mais recente
             ultima_data = df_focus['data_relatorio'].max()
             df_last = df_focus[df_focus['data_relatorio'] == ultima_data]
             
             data_str = pd.to_datetime(ultima_data).strftime('%d/%m/%Y')
             st.markdown(f"**Boletim Focus ({data_str})**")
             
-            # --- PARTE 1: DESTAQUES DO ANO ATUAL ---
+            # --- DESTAQUES (Mantivemos os 4 principais no topo) ---
             df_atual = df_last[df_last['ano_referencia'] == ano_atual]
-            # Pivot para pegar valores fáceis
             pivot_atual = df_atual.pivot_table(index='Indicador', values='previsao', aggfunc='mean')
             
             fc1, fc2, fc3, fc4 = st.columns(4)
-            # .get(..., 0) evita erro se o dado não existir
-            ipca_f = pivot_atual.loc['IPCA', 'previsao'] if 'IPCA' in pivot_atual.index else 0
-            selic_f = pivot_atual.loc['Selic', 'previsao'] if 'Selic' in pivot_atual.index else 0
-            pib_f = pivot_atual.loc['PIB Total', 'previsao'] if 'PIB Total' in pivot_atual.index else 0
-            cambio_f = pivot_atual.loc['Câmbio', 'previsao'] if 'Câmbio' in pivot_atual.index else 0
+            # Função auxiliar segura para pegar valor
+            def get_val(idx): return pivot_atual.loc[idx, 'previsao'] if idx in pivot_atual.index else 0
             
-            fc1.metric(f"IPCA {ano_atual}", f"{ipca_f:.2f}%")
-            fc2.metric(f"Selic {ano_atual}", f"{selic_f:.2f}%")
-            fc3.metric(f"PIB {ano_atual}", f"{pib_f:.2f}%")
-            fc4.metric(f"Dólar {ano_atual}", f"R$ {cambio_f:.2f}")
+            fc1.metric(f"IPCA {ano_atual}", f"{get_val('IPCA'):.2f}%")
+            fc2.metric(f"Selic {ano_atual}", f"{get_val('Selic'):.2f}%")
+            fc3.metric(f"PIB {ano_atual}", f"{get_val('PIB Total'):.2f}%")
+            fc4.metric(f"Dólar {ano_atual}", f"R$ {get_val('Câmbio'):.2f}")
             
-            # --- PARTE 2: TABELA PRÓXIMOS ANOS ---
+            # --- TABELA COMPLETA (Setor Externo e Fiscal) ---
             st.divider()
-            st.markdown("###### 📅 Projeções para os Próximos Anos")
+            st.markdown("###### 📅 Projeções Macroeconômicas (2025 - 2027)")
             
-            # Filtra ano atual + próximos 2 anos
             anos_exibir = [ano_atual, ano_atual + 1, ano_atual + 2]
             df_table = df_last[df_last['ano_referencia'].isin(anos_exibir)].copy()
-            
-            # Cria a tabela Pivotada (Linha=Indicador, Coluna=Ano)
             df_pivot_multi = df_table.pivot_table(index='Indicador', columns='ano_referencia', values='previsao')
             
-            # Reordena as linhas para ficar lógico
-            ordem = ['IPCA', 'Selic', 'PIB Total', 'Câmbio']
-            df_pivot_multi = df_pivot_multi.reindex(ordem)
+            # Ordem lógica de exibição
+            ordem = [
+                'IPCA', 'IGP-M', 'IPCA Administrados', 'Selic', 'Câmbio', 'PIB Total', # Atividade/Inflação
+                'Dívida líquida do setor público', 'Resultado primário', 'Resultado nominal', # Fiscal
+                'Balança comercial', 'Conta corrente', 'Investimento direto no país' # Externo
+            ]
+            # Filtra apenas os que existem na resposta para evitar erro
+            ordem_final = [x for x in ordem if x in df_pivot_multi.index]
+            df_pivot_multi = df_pivot_multi.reindex(ordem_final)
             
-            # Formatação "Na Mão" para ficar bonito (misturar % e R$)
-            # Criamos um DataFrame de Strings para exibição
+            # --- FORMATAÇÃO INTELIGENTE (US$, R$ e %) ---
             df_display = df_pivot_multi.copy()
-            for col in df_display.columns:
-                df_display[col] = df_display.apply(lambda x: f"{x[col]:.2f}%" if x.name != 'Câmbio' else f"R$ {x[col]:.2f}", axis=1)
             
-            # Exibe a tabela limpa
+            for col in df_display.columns:
+                def formatador_inteligente(row):
+                    val = row[col]
+                    nome = row.name
+                    if pd.isna(val): return "-"
+                    
+                    if 'Câmbio' in nome:
+                        return f"R$ {val:.2f}"
+                    elif any(x in nome for x in ['comercial', 'Conta corrente', 'Investimento']):
+                        return f"US$ {val:.2f} B" # Bilhões de Dólares
+                    else:
+                        return f"{val:.2f}%" # O resto é tudo % (PIB, Dívida, Inflação)
+
+                df_display[col] = df_display.apply(formatador_inteligente, axis=1)
+            
             st.dataframe(df_display, use_container_width=True)
 
         else:

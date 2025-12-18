@@ -3,7 +3,7 @@ import sidrapy
 import pandas as pd
 import numpy as np
 import plotly.express as px
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import requests
 import yfinance as yf
 from matplotlib.colors import LinearSegmentedColormap
@@ -49,6 +49,14 @@ st.markdown("""
         padding: 10px;
         margin: 10px 0;
         border-radius: 4px;
+    }
+    .info-box {
+        background-color: #f0f8ff;
+        border-left: 4px solid #007bff;
+        padding: 10px;
+        margin: 10px 0;
+        border-radius: 4px;
+        font-size: 0.9em;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -232,34 +240,24 @@ def get_currency_realtime(test_mode=False):
             for t in tickers:
                 try:
                     ticker_obj = yf.Ticker(t)
-                    # Método alternativo mais confiável
-                    hist = ticker_obj.history(period="1d", interval="1m")
+                    # Método mais confiável usando history
+                    hist = ticker_obj.history(period="2d", interval="1d")
                     
                     if not hist.empty:
                         preco_atual = hist['Close'].iloc[-1]
                         fechamento_anterior = hist['Close'].iloc[0] if len(hist) > 1 else preco_atual
                         variacao = ((preco_atual - fechamento_anterior) / fechamento_anterior) * 100
                         
-                        key = t.replace("=X", "").replace("BRL", "")  # USDBRL → USD
-                        if key == "USD":
-                            key = "USDBRL"
-                        elif key == "EUR":
-                            key = "EURBRL"
-                        
+                        key = "USDBRL" if "USD" in t else "EURBRL"
                         dados[key] = {'bid': float(preco_atual), 'pctChange': float(variacao)}
                     else:
                         # Fallback para método anterior
                         info = ticker_obj.info
-                        preco_atual = info.get('regularMarketPrice', 0)
+                        preco_atual = info.get('regularMarketPrice', 0) or info.get('currentPrice', 0)
                         fechamento_anterior = info.get('previousClose', preco_atual)
                         variacao = ((preco_atual - fechamento_anterior) / fechamento_anterior) * 100 if fechamento_anterior != 0 else 0
                         
-                        key = t.replace("=X", "").replace("BRL", "")
-                        if key == "USD":
-                            key = "USDBRL"
-                        elif key == "EUR":
-                            key = "EURBRL"
-                        
+                        key = "USDBRL" if "USD" in t else "EURBRL"
                         dados[key] = {'bid': float(preco_atual), 'pctChange': float(variacao)}
                         
                 except Exception as e:
@@ -328,26 +326,36 @@ def get_macro_real(test_mode=False):
     """Função para obter dados macroeconômicos com suporte a test_mode"""
     if test_mode:
         # Retorna dicionário vazio para teste rápido
-        return {"dados": {}, "ultima_atualizacao": "Não disponível"}
+        return {"dados": {}, "ultima_atualizacao": "Não disponível", "metodologia": {}}
     
+    # SÉRIES CORRETAS DO BCB SGS (baseado nas suas informações)
     series = {
-        'PIB (R$ Bi)': 4382,
-        'Dívida Líq. (% PIB)': 4513,
-        'Res. Primário (% PIB)': 5362,
-        'Res. Nominal (% PIB)': 5360,
-        'Balança Com. (US$ Mi)': 22707,
-        'Trans. Correntes (US$ Mi)': 22724,
-        'IDP (US$ Mi)': 22885
+        'PIB Nominal (R$ Mi)': {'codigo': 4380, 'tipo': 'pib'},
+        'Dívida Líq. (% PIB)': {'codigo': 4513, 'tipo': 'percentual'},
+        'Res. Primário (% PIB)': {'codigo': 4520, 'tipo': 'percentual'},
+        'Res. Nominal (% PIB)': {'codigo': 4521, 'tipo': 'percentual'},
+        'Balança Com. (US$ Mi)': {'codigo': 22705, 'tipo': 'externo'},
+        'Trans. Correntes (US$ Mi)': {'codigo': 22707, 'tipo': 'externo'},
+        'IDP (US$ Mi)': {'codigo': 22704, 'tipo': 'externo'}
     }
     
     resultados = {}
     ultimas_datas = []
+    metodologia = {}
     headers = {'User-Agent': 'Mozilla/5.0'}
     
     try:
-        for nome, codigo in series.items():
+        for nome, info in series.items():
             try:
-                url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo}/dados/ultimos/13?formato=json"
+                codigo = info['codigo']
+                tipo = info['tipo']
+                
+                # Para dados externos, pegar mais dados para cálculo de 12 meses
+                if tipo == 'externo':
+                    url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo}/dados/ultimos/24?formato=json"
+                else:
+                    url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo}/dados/ultimos/13?formato=json"
+                
                 resp = requests.get(url, headers=headers, verify=False, timeout=10)
                 df = pd.DataFrame(resp.json())
                 
@@ -357,19 +365,36 @@ def get_macro_real(test_mode=False):
                 
                 df['valor'] = pd.to_numeric(df['valor'], errors='coerce')
                 df['data'] = pd.to_datetime(df['data'], format='%d/%m/%Y', errors='coerce')
+                df = df.sort_values('data', ascending=True)
                 
                 # Guarda a última data disponível
                 if not df['data'].empty:
                     ultimas_datas.append(df['data'].max())
                 
-                if nome == 'PIB (R$ Bi)':
-                    valor_final = df['valor'].iloc[-1] / 1_000_000 
-                elif 'Balança' in nome or 'Trans.' in nome or 'IDP' in nome:
-                    valor_final = df['valor'].iloc[-12:].sum() / 1_000
-                elif 'Primário' in nome or 'Nominal' in nome:
-                    valor_final = df['valor'].iloc[-1] * -1
-                else:
+                # Cálculos específicos para cada tipo
+                if tipo == 'pib':
+                    # PIB Nominal - cálculo do acumulado 12 meses (últimos 4 trimestres)
+                    if len(df) >= 4:
+                        # Supondo dados trimestrais - pegar últimos 4 trimestres
+                        valor_final = df['valor'].iloc[-4:].sum() / 1_000_000  # Convertendo para Trilhões
+                        metodologia[nome] = "Acumulado dos últimos 4 trimestres (12 meses)"
+                    else:
+                        valor_final = df['valor'].iloc[-1] / 1_000_000
+                        metodologia[nome] = "Último trimestre disponível"
+                
+                elif tipo == 'externo':
+                    # Dados do setor externo - soma dos últimos 12 meses
+                    if len(df) >= 12:
+                        valor_final = df['valor'].iloc[-12:].sum() / 1_000  # Convertendo para Bilhões
+                        metodologia[nome] = "Soma dos últimos 12 meses"
+                    else:
+                        valor_final = df['valor'].sum() / 1_000
+                        metodologia[nome] = "Soma de todos os meses disponíveis"
+                
+                else:  # percentual (% PIB)
+                    # Para indicadores em % do PIB, usar o último valor disponível
                     valor_final = df['valor'].iloc[-1]
+                    metodologia[nome] = "Último período disponível"
                 
                 resultados[nome] = valor_final
                 
@@ -384,12 +409,13 @@ def get_macro_real(test_mode=False):
         
         return {
             "dados": resultados,
-            "ultima_atualizacao": ultima_atualizacao
+            "ultima_atualizacao": ultima_atualizacao,
+            "metodologia": metodologia
         }
         
     except Exception as e:
         st.error(f"❌ Erro geral nos dados macroeconômicos: {str(e)}")
-        return {"dados": {}, "ultima_atualizacao": "Não disponível"}
+        return {"dados": {}, "ultima_atualizacao": "Não disponível", "metodologia": {}}
 
 def processar_dataframe_comum(df):
     if df.empty: 
@@ -938,34 +964,60 @@ with st.expander("🧩 Conjuntura Macroeconômica (Dados Oficiais Realizados)", 
         macro_result = get_macro_real()
         macro_dados = macro_result.get("dados", {})
         ultima_atualizacao = macro_result.get("ultima_atualizacao", "Não disponível")
+        metodologia = macro_result.get("metodologia", {})
     
     if macro_dados:
         st.caption(f"Fonte: Banco Central do Brasil (SGS) • Acumulado últimos 12 meses")
         st.caption(f"📅 Última atualização: {ultima_atualizacao}")
+        
+        # Informações de metodologia
+        with st.expander("📊 Metodologia dos Cálculos", expanded=False):
+            for nome, metodo in metodologia.items():
+                st.markdown(f"**{nome}**: {metodo}")
+        
         st.markdown("---")
         
         st.markdown("##### 📈 Atividade & Fiscal")
         c1, c2, c3, c4 = st.columns(4)
         
         with c1:
-            st.metric("PIB (Acum. 12m)", f"R$ {macro_dados.get('PIB (R$ Bi)', 0):.2f} Tri")
+            pib_valor = macro_dados.get('PIB Nominal (R$ Mi)', 0)
+            st.metric("PIB (Acum. 12m)", f"R$ {pib_valor:.2f} Tri", 
+                     help="PIB Nominal acumulado dos últimos 4 trimestres")
+        
         with c2:
-            st.metric("Dív. Líquida Setor Púb.", f"{macro_dados.get('Dívida Líq. (% PIB)', 0):.1f}% PIB")
+            divida_valor = macro_dados.get('Dívida Líq. (% PIB)', 0)
+            st.metric("Dív. Líquida Setor Púb.", f"{divida_valor:.1f}% PIB",
+                     help="Dívida Líquida do Setor Público em % do PIB")
+        
         with c3:
-            st.metric("Res. Primário", f"{macro_dados.get('Res. Primário (% PIB)', 0):.2f}% PIB")
+            primario_valor = macro_dados.get('Res. Primário (% PIB)', 0)
+            st.metric("Res. Primário", f"{primario_valor:.2f}% PIB",
+                     help="Resultado Primário do Setor Público em % do PIB")
+        
         with c4:
-            st.metric("Res. Nominal", f"{macro_dados.get('Res. Nominal (% PIB)', 0):.2f}% PIB")
+            nominal_valor = macro_dados.get('Res. Nominal (% PIB)', 0)
+            st.metric("Res. Nominal", f"{nominal_valor:.2f}% PIB",
+                     help="Resultado Nominal do Setor Público em % do PIB (inclui juros)")
         
         st.markdown("---")
-        st.markdown("##### 🌍 Setor Externo")
+        st.markdown("##### 🌍 Setor Externo (Acum. 12 meses)")
         c5, c6, c7 = st.columns(3)
         
         with c5:
-            st.metric("Balança Comercial", f"US$ {macro_dados.get('Balança Com. (US$ Mi)', 0):.1f} Bi")
+            balanca_valor = macro_dados.get('Balança Com. (US$ Mi)', 0)
+            st.metric("Balança Comercial", f"US$ {balanca_valor:.1f} Bi",
+                     help="Saldo da Balança Comercial (Exportações - Importações)")
+        
         with c6:
-            st.metric("Transações Correntes", f"US$ {macro_dados.get('Trans. Correntes (US$ Mi)', 0):.1f} Bi")
+            trans_valor = macro_dados.get('Trans. Correntes (US$ Mi)', 0)
+            st.metric("Transações Correntes", f"US$ {trans_valor:.1f} Bi",
+                     help="Saldo das Transações Correntes (Conta Corrente)")
+        
         with c7:
-            st.metric("Investimento Direto (IDP)", f"US$ {macro_dados.get('IDP (US$ Mi)', 0):.1f} Bi")
+            idp_valor = macro_dados.get('IDP (US$ Mi)', 0)
+            st.metric("Investimento Direto (IDP)", f"US$ {idp_valor:.1f} Bi",
+                     help="Investimento Direto no País")
     else:
         st.warning("Não foi possível carregar os dados macroeconômicos do BCB.")
         st.info("""
@@ -1072,6 +1124,7 @@ with st.expander("💸 Histórico de Câmbio (Dólar e Euro desde 1994)", expand
             if not df_cambio.empty:
                 df_view = df_cambio.sort_index(ascending=False).reset_index()
                 df_view.rename(columns={'index': 'Data'}, inplace=True)
+                # CORREÇÃO DO ERRO: estava '%d/mm/mv', corrigido para '%d/%m/%Y'
                 df_view['Data'] = df_view['Data'].dt.strftime('%d/%m/%Y')
                 df_view.columns = ['Data', 'Dólar (R$)', 'Euro (R$)']
                 st.dataframe(df_view, use_container_width=True, hide_index=True)

@@ -267,6 +267,36 @@ def carregar_historico_cambio() -> Tuple[pd.DataFrame, str, str]:
         StatusFonte.atualizar('cambio_historico', 'manual', 'Dados Indisponíveis')
         return pd.DataFrame(), 'manual', 'Erro na Carga'
 
+@st.cache_data(ttl=Config.TTL_LONG)
+@log_errors
+def carregar_dados_sidra(codigo_tabela: str, codigo_variavel: str) -> pd.DataFrame:
+    """Carrega dados do SIDRA/IBGE"""
+    try:
+        dados = sidrapy.get_table(
+            table_code=codigo_tabela,
+            territorial_level="1",
+            ibge_territorial_code="all",
+            variable=codigo_variavel,
+            period="last 360"
+        )
+        
+        if dados.empty or len(dados) < 2:
+            return pd.DataFrame()
+        
+        df = dados.iloc[1:].copy()
+        df.rename(columns={'V': 'valor', 'D2N': 'mes_ano'}, inplace=True)
+        df['valor'] = pd.to_numeric(df['valor'], errors='coerce')
+        df['data_date'] = pd.to_datetime(df['D2C'], format="%Y%m", errors='coerce')
+        df['ano'] = df['D2C'].str.slice(0, 4)
+        
+        # Atualiza status - sempre automático para SIDRA
+        StatusFonte.atualizar('indicador_principal', 'automático', 'IBGE/SIDRA')
+        
+        return processar_dataframe(df)
+    except Exception as e:
+        logger.error(f"Erro SIDRA {codigo_tabela}: {e}")
+        return pd.DataFrame()        
+
 def carregar_dados_focus() -> Tuple[pd.DataFrame, str, str]:
     """Wrapper que decide entre API Otimizada e Fallback"""
     # 1. Tenta a API Otimizada

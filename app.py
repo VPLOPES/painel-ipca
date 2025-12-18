@@ -7,6 +7,7 @@ from datetime import date
 import requests
 import yfinance as yf
 from matplotlib.colors import LinearSegmentedColormap
+import time
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(
@@ -163,80 +164,96 @@ def processar_dataframe_comum(df):
     df['acum_12m'] = (df['fator'].rolling(window=12).apply(np.prod, raw=True) - 1) * 100
     return df.sort_values('data_date', ascending=False)
 
-# 7. Dados Macroeconômicos (KPIs YTD + Séries Históricas)
+# 7. Dados Macroeconômicos (Com Retries/Re-tentativas para estabilidade)
 @st.cache_data(ttl=3600)
 def get_macro_real():
     # Códigos SGS
     series = {
-        'PIB': 4382,           # PIB Acum. 12m (R$ Mi)
-        'Dívida Líq.': 4513,   # % PIB
-        'Res. Primário': 5793, # Fluxo Mensal (R$ Mi)
-        'Res. Nominal': 5811,  # Fluxo Mensal (R$ Mi)
-        'Balança Com.': 22707, # Saldo Mensal (US$ Mi)
-        'Trans. Correntes': 22724, # Saldo Mensal (US$ Mi)
-        'IDP': 22885           # Ingresso Mensal (US$ Mi)
+        'PIB': 4382,           
+        'Dívida Líq.': 4513,   
+        'Res. Primário': 5793, 
+        'Res. Nominal': 5811,  
+        'Balança Com.': 22707, 
+        'Trans. Correntes': 22724, 
+        'IDP': 22885           
     }
     
-    kpis = {}       # Para os cartões (KPIs)
-    historico = {}  # Para os gráficos
+    kpis = {}
+    historico = {}
     
+    # Headers para simular um navegador real (evita bloqueio)
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json'
     }
     
     mapa_meses = {'01':'jan', '02':'fev', '03':'mar', '04':'abr', '05':'mai', '06':'jun',
                   '07':'jul', '08':'ago', '09':'set', '10':'out', '11':'nov', '12':'dez'}
     
     for nome, codigo in series.items():
-        try:
-            # Baixa 60 meses (5 anos) para ter gráfico bom
-            url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo}/dados/ultimos/60?formato=json"
-            resp = requests.get(url, headers=headers, verify=False, timeout=10)
-            resp.raise_for_status()
-            
-            df = pd.DataFrame(resp.json())
-            df['valor'] = pd.to_numeric(df['valor'])
-            df['data_dt'] = pd.to_datetime(df['data'], format='%d/%m/%Y')
-            
-            # --- PREPARA DADOS PARA O GRÁFICO ---
-            # Ajuste de Unidades para o Gráfico
-            df_chart = df.copy()
-            if nome == 'PIB':
-                df_chart['valor'] = df_chart['valor'] / 1_000_000 # Trilhões
-            elif nome in ['Balança Com.', 'Trans. Correntes', 'IDP']:
-                df_chart['valor'] = df_chart['valor'] / 1_000 # Bilhões
-            elif 'Primário' in nome or 'Nominal' in nome:
-                df_chart['valor'] = (df_chart['valor'] * -1) / 1_000 # Inverte sinal e vira Bilhões
-            # Dívida já está em % correto
-            
-            historico[nome] = df_chart
-            
-            # --- PREPARA DADOS PARA O KPI (ACUMULADO ANO / YTD) ---
-            ultimo = df.iloc[-1]
-            ano_atual = ultimo['data_dt'].year
-            data_curta = f"{mapa_meses[ultimo['data'].split('/')[1]]}/{str(ano_atual)[2:]}"
-            
-            val_kpi = 0
-            if nome == 'PIB':
-                val_kpi = ultimo['valor'] / 1_000_000
-            elif nome == 'Dívida Líq.':
-                val_kpi = ultimo['valor']
-            else:
-                # Soma YTD (Apenas meses do ano atual)
-                df_ano = df[df['data_dt'].dt.year == ano_atual]
-                soma = df_ano['valor'].sum()
+        # Tenta até 3 vezes para cada indicador
+        sucesso = False
+        for tentativa in range(3):
+            try:
+                url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo}/dados/ultimos/60?formato=json"
                 
-                if 'Primário' in nome or 'Nominal' in nome:
-                    val_kpi = (soma * -1) / 1_000
+                # Timeout curto (5s) para falhar logo e tentar de novo se travar
+                resp = requests.get(url, headers=headers, verify=False, timeout=5)
+                resp.raise_for_status()
+                
+                dados_json = resp.json()
+                
+                # Se a API retornar lista vazia ou erro disfarçado
+                if not dados_json or len(dados_json) == 0:
+                    raise ValueError("JSON vazio")
+
+                df = pd.DataFrame(dados_json)
+                df['valor'] = pd.to_numeric(df['valor'])
+                df['data_dt'] = pd.to_datetime(df['data'], format='%d/%m/%Y')
+                
+                # --- PREPARA GRÁFICO ---
+                df_chart = df.copy()
+                if nome == 'PIB':
+                    df_chart['valor'] = df_chart['valor'] / 1_000_000 
+                elif nome in ['Balança Com.', 'Trans. Correntes', 'IDP']:
+                    df_chart['valor'] = df_chart['valor'] / 1_000 
+                elif 'Primário' in nome or 'Nominal' in nome:
+                    df_chart['valor'] = (df_chart['valor'] * -1) / 1_000 
+                
+                historico[nome] = df_chart
+                
+                # --- PREPARA KPI ---
+                ultimo = df.iloc[-1]
+                ano_atual = ultimo['data_dt'].year
+                mes_str = ultimo['data'].split('/')[1]
+                data_curta = f"{mapa_meses[mes_str]}/{str(ano_atual)[2:]}"
+                
+                val_kpi = 0
+                if nome == 'PIB':
+                    val_kpi = ultimo['valor'] / 1_000_000
+                elif nome == 'Dívida Líq.':
+                    val_kpi = ultimo['valor']
                 else:
-                    val_kpi = soma / 1_000
-            
-            kpis[nome] = {'valor': val_kpi, 'data': data_curta, 'ano': ano_atual}
-            
-        except Exception as e:
-            # print(f"Falha em {nome}: {e}")
-            continue
-            
+                    df_ano = df[df['data_dt'].dt.year == ano_atual]
+                    soma = df_ano['valor'].sum()
+                    if 'Primário' in nome or 'Nominal' in nome:
+                        val_kpi = (soma * -1) / 1_000
+                    else:
+                        val_kpi = soma / 1_000
+                
+                kpis[nome] = {'valor': val_kpi, 'data': data_curta, 'ano': ano_atual}
+                
+                sucesso = True
+                break # Conseguiu? Sai do loop de tentativas
+                
+            except Exception as e:
+                # Se falhar, espera um pouco antes de tentar de novo
+                time.sleep(1)
+                continue
+        
+        if not sucesso:
+            print(f"Falha definitiva ao carregar: {nome}")
+
     return kpis, historico
 
 # --- CÁLCULO ---

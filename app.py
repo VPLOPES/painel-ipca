@@ -84,7 +84,7 @@ def get_bcb_data(codigo_serie):
         # print(f"Erro BCB {codigo_serie}: {e}")
         return pd.DataFrame()
 
-# 3. Boletim Focus
+# 3. Boletim Focus (Expandido com Fiscal e Externo)
 @st.cache_data(ttl=3600)
 def get_focus_data():
     try:
@@ -92,7 +92,15 @@ def get_focus_data():
         response = requests.get(url)
         data_json = response.json()
         df = pd.DataFrame(data_json['value'])
-        indicadores = ['IPCA', 'PIB Total', 'Selic', 'Câmbio']
+        
+        # Lista expandida com os novos indicadores
+        indicadores = [
+            'IPCA', 'PIB Total', 'Selic', 'Câmbio', 'IGP-M',
+            'IPCA Administrados', 'Conta corrente', 'Balança comercial',
+            'Investimento direto no país', 'Dívida líquida do setor público',
+            'Resultado primário', 'Resultado nominal'
+        ]
+        
         df = df[df['Indicador'].isin(indicadores)]
         df = df.rename(columns={'Data': 'data_relatorio', 'DataReferencia': 'ano_referencia', 'Mediana': 'previsao'})
         df['ano_referencia'] = df['ano_referencia'].astype(int)

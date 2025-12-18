@@ -77,7 +77,6 @@ def get_data_update_info(df, source_name):
     else:
         return f"{source_name}: Disponível"
 
-# ADICIONE ESTA FUNÇÃO AQUI - SOMENTE UMA VEZ!
 def format_valor_focus(valor, nome):
     """Formata valores do Focus para exibição"""
     if pd.isna(valor):
@@ -233,25 +232,63 @@ def get_currency_realtime(test_mode=False):
             for t in tickers:
                 try:
                     ticker_obj = yf.Ticker(t)
-                    info = ticker_obj.fast_info
-                    preco_atual = info.get('last_price', 0)
-                    fechamento_anterior = info.get('previous_close', preco_atual)
-                    variacao = ((preco_atual - fechamento_anterior) / fechamento_anterior) * 100 if fechamento_anterior != 0 else 0
-                    key = t.replace("=X", "") 
-                    dados[key] = {'bid': preco_atual, 'pctChange': variacao}
+                    # Método alternativo mais confiável
+                    hist = ticker_obj.history(period="1d", interval="1m")
+                    
+                    if not hist.empty:
+                        preco_atual = hist['Close'].iloc[-1]
+                        fechamento_anterior = hist['Close'].iloc[0] if len(hist) > 1 else preco_atual
+                        variacao = ((preco_atual - fechamento_anterior) / fechamento_anterior) * 100
+                        
+                        key = t.replace("=X", "").replace("BRL", "")  # USDBRL → USD
+                        if key == "USD":
+                            key = "USDBRL"
+                        elif key == "EUR":
+                            key = "EURBRL"
+                        
+                        dados[key] = {'bid': float(preco_atual), 'pctChange': float(variacao)}
+                    else:
+                        # Fallback para método anterior
+                        info = ticker_obj.info
+                        preco_atual = info.get('regularMarketPrice', 0)
+                        fechamento_anterior = info.get('previousClose', preco_atual)
+                        variacao = ((preco_atual - fechamento_anterior) / fechamento_anterior) * 100 if fechamento_anterior != 0 else 0
+                        
+                        key = t.replace("=X", "").replace("BRL", "")
+                        if key == "USD":
+                            key = "USDBRL"
+                        elif key == "EUR":
+                            key = "EURBRL"
+                        
+                        dados[key] = {'bid': float(preco_atual), 'pctChange': float(variacao)}
+                        
                 except Exception as e:
                     st.warning(f"Erro ao buscar {t}: {str(e)}")
+                    # Valores padrão em caso de erro
+                    if "USD" in t:
+                        dados["USDBRL"] = {'bid': 5.50, 'pctChange': 0.0}
+                    elif "EUR" in t:
+                        dados["EURBRL"] = {'bid': 6.00, 'pctChange': 0.0}
         
         if not dados:
             st.warning("Não foi possível obter cotações em tempo real")
-            return pd.DataFrame()
+            # Valores padrão de fallback
+            dados = {
+                "USDBRL": {'bid': 5.50, 'pctChange': 0.0},
+                "EURBRL": {'bid': 6.00, 'pctChange': 0.0}
+            }
             
         df = pd.DataFrame.from_dict(dados, orient='index')
         return df
         
     except Exception as e:
         st.error(f"❌ Erro nas cotações em tempo real: {str(e)}")
-        return pd.DataFrame()
+        # Retorna valores padrão
+        dados = {
+            "USDBRL": {'bid': 5.50, 'pctChange': 0.0},
+            "EURBRL": {'bid': 6.00, 'pctChange': 0.0}
+        }
+        return pd.DataFrame.from_dict(dados, orient='index')
 
 @st.cache_data(ttl=86400, show_spinner="Carregando histórico de câmbio...")
 def get_cambio_historico(test_mode=False):
@@ -291,7 +328,7 @@ def get_macro_real(test_mode=False):
     """Função para obter dados macroeconômicos com suporte a test_mode"""
     if test_mode:
         # Retorna dicionário vazio para teste rápido
-        return {}
+        return {"dados": {}, "ultima_atualizacao": "Não disponível"}
     
     series = {
         'PIB (R$ Bi)': 4382,
@@ -304,6 +341,7 @@ def get_macro_real(test_mode=False):
     }
     
     resultados = {}
+    ultimas_datas = []
     headers = {'User-Agent': 'Mozilla/5.0'}
     
     try:
@@ -318,6 +356,11 @@ def get_macro_real(test_mode=False):
                     continue
                 
                 df['valor'] = pd.to_numeric(df['valor'], errors='coerce')
+                df['data'] = pd.to_datetime(df['data'], format='%d/%m/%Y', errors='coerce')
+                
+                # Guarda a última data disponível
+                if not df['data'].empty:
+                    ultimas_datas.append(df['data'].max())
                 
                 if nome == 'PIB (R$ Bi)':
                     valor_final = df['valor'].iloc[-1] / 1_000_000 
@@ -334,11 +377,19 @@ def get_macro_real(test_mode=False):
                 st.warning(f"Erro na série {nome}: {str(e)}")
                 continue
         
-        return resultados
+        # Determina a data de atualização (mais recente entre as séries)
+        ultima_atualizacao = "Não disponível"
+        if ultimas_datas:
+            ultima_atualizacao = max(ultimas_datas).strftime('%d/%m/%Y')
+        
+        return {
+            "dados": resultados,
+            "ultima_atualizacao": ultima_atualizacao
+        }
         
     except Exception as e:
         st.error(f"❌ Erro geral nos dados macroeconômicos: {str(e)}")
-        return {}
+        return {"dados": {}, "ultima_atualizacao": "Não disponível"}
 
 def processar_dataframe_comum(df):
     if df.empty: 
@@ -608,7 +659,12 @@ if st.sidebar.button("Calcular", type="primary", use_container_width=True):
 
 # CABEÇALHO PRINCIPAL
 st.title(f"📊 Painel: {tipo_indice.split()[0]}")
-st.caption(f"Fonte: {fonte} • Atualização: {get_data_update_info(df, '')}")
+if not df.empty:
+    update_date = df['data_date'].max() if 'data_date' in df.columns else None
+    update_str = format_date(update_date) if update_date else "Não disponível"
+    st.caption(f"Fonte: {fonte} • Última atualização: {update_str}")
+else:
+    st.caption(f"Fonte: {fonte} • Dados temporariamente indisponíveis")
 
 if not df.empty:
     # KPIs PRINCIPAIS
@@ -690,8 +746,19 @@ if not df.empty:
                     matrix = matrix[ordem].sort_index(ascending=False)
                     
                     # Define limites dinâmicos para o gradiente
-                    vmin = matrix.min().min() if not matrix.empty else -1.5
-                    vmax = matrix.max().max() if not matrix.empty else 1.5
+                    # Para IPCA/INPC: -2% a +2% são limites razoáveis
+                    if any(x in tipo_indice for x in ["IPCA", "INPC", "IGP-M"]):
+                        vmin, vmax = -2, 2
+                    elif "SELIC" in tipo_indice or "CDI" in tipo_indice:
+                        vmin, vmax = 0, 2  # Taxas positivas
+                    else:
+                        # Limites dinâmicos baseados nos dados
+                        vmin = matrix.min().min() * 1.1 if not matrix.empty else -1.5
+                        vmax = matrix.max().max() * 1.1 if not matrix.empty else 1.5
+                    
+                    # Garante que vmin seja negativo para IPCA/INPC para ter vermelho/verde
+                    if any(x in tipo_indice for x in ["IPCA", "INPC", "IGP-M"]) and vmin >= 0:
+                        vmin = -0.5
                     
                     st.dataframe(
                         matrix.style.background_gradient(
@@ -824,24 +891,41 @@ with st.expander("🔭 Expectativas de Mercado (Focus) & Câmbio Hoje", expanded
             
             mc1, mc2 = st.columns(2)
             try:
-                usd = df_moedas.loc['USDBRL']
-                eur = df_moedas.loc['EURBRL']
+                # Verifica se as chaves existem
+                if 'USDBRL' in df_moedas.index:
+                    usd = df_moedas.loc['USDBRL']
+                    delta_usd = f"{float(usd['pctChange']):+.2f}%" if 'pctChange' in usd and pd.notna(usd['pctChange']) else None
+                    valor_usd = f"R$ {float(usd['bid']):.2f}" if 'bid' in usd and pd.notna(usd['bid']) else "R$ 0.00"
+                else:
+                    delta_usd = None
+                    valor_usd = "R$ 0.00"
+                
+                if 'EURBRL' in df_moedas.index:
+                    eur = df_moedas.loc['EURBRL']
+                    delta_eur = f"{float(eur['pctChange']):+.2f}%" if 'pctChange' in eur and pd.notna(eur['pctChange']) else None
+                    valor_eur = f"R$ {float(eur['bid']):.2f}" if 'bid' in eur and pd.notna(eur['bid']) else "R$ 0.00"
+                else:
+                    delta_eur = None
+                    valor_eur = "R$ 0.00"
                 
                 with mc1:
-                    delta_usd = f"{float(usd['pctChange']):+.2f}%" if 'pctChange' in usd else None
-                    st.metric("Dólar (USD/BRL)", f"R$ {float(usd['bid']):.2f}", delta_usd)
+                    st.metric("Dólar (USD/BRL)", valor_usd, delta_usd)
                 
                 with mc2:
-                    delta_eur = f"{float(eur['pctChange']):+.2f}%" if 'pctChange' in eur else None
-                    st.metric("Euro (EUR/BRL)", f"R$ {float(eur['bid']):.2f}", delta_eur)
+                    st.metric("Euro (EUR/BRL)", valor_eur, delta_eur)
                     
             except Exception as e:
                 st.error(f"Erro ao processar cotações: {str(e)}")
-                st.info("Mostrando últimos valores disponíveis")
-                st.dataframe(df_moedas, use_container_width=True)
+                st.info("Mostrando valores de fallback")
+                # Valores de fallback
+                mc1.metric("Dólar (USD/BRL)", "R$ 5.50", "0.00%")
+                mc2.metric("Euro (EUR/BRL)", "R$ 6.00", "0.00%")
         else:
             st.warning("Cotações em tempo real indisponíveis")
-            st.info("Verificando conexão com Yahoo Finance...")
+            st.info("Usando valores de referência")
+            mc1, mc2 = st.columns(2)
+            mc1.metric("Dólar (USD/BRL)", "R$ 5.50", "0.00%")
+            mc2.metric("Euro (EUR/BRL)", "R$ 6.00", "0.00%")
 
 # ==============================================================================
 # SEÇÃO CONJUNTURA MACRO
@@ -851,10 +935,13 @@ with st.expander("🧩 Conjuntura Macroeconômica (Dados Oficiais Realizados)", 
     st.subheader("🏛️ Indicadores Macroeconômicos Reais")
     
     with st.spinner("Carregando dados do BCB..."):
-        macro_dados = get_macro_real()
+        macro_result = get_macro_real()
+        macro_dados = macro_result.get("dados", {})
+        ultima_atualizacao = macro_result.get("ultima_atualizacao", "Não disponível")
     
     if macro_dados:
-        st.caption("Fonte: Banco Central do Brasil (SGS) • Acumulado últimos 12 meses")
+        st.caption(f"Fonte: Banco Central do Brasil (SGS) • Acumulado últimos 12 meses")
+        st.caption(f"📅 Última atualização: {ultima_atualizacao}")
         st.markdown("---")
         
         st.markdown("##### 📈 Atividade & Fiscal")

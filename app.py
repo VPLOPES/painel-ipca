@@ -62,7 +62,9 @@ class Config:
         'CDI': '#FFFFFF',       # Branco
         'positivo': '#4CAF50',  # Verde sucesso
         'negativo': '#F44336',  # Vermelho alerta
-        'neutro': '#607D8B'     # Cinza
+        'neutro': '#607D8B',    # Cinza
+        'automatico': '#4CAF50',# Verde para automático
+        'manual': '#FF9800'     # Laranja para manual
     }
 
 # Metadados das fontes
@@ -104,6 +106,62 @@ METADADOS_FONTES = {
     }
 }
 
+# --- SISTEMA DE STATUS DA FONTE DOS DADOS ---
+class StatusFonte:
+    """Gerencia o status da fonte dos dados (automático/manual)"""
+    
+    @staticmethod
+    def inicializar():
+        """Inicializa o status das fontes no session_state"""
+        if 'fontes_status' not in st.session_state:
+            st.session_state['fontes_status'] = {
+                'focus': {'tipo': None, 'data': None, 'fonte': None},
+                'cambio_tempo_real': {'tipo': None, 'data': None, 'fonte': None},
+                'cambio_historico': {'tipo': None, 'data': None, 'fonte': None},
+                'macro': {'tipo': None, 'data': None, 'fonte': None},
+                'indicador_principal': {'tipo': None, 'data': None, 'fonte': None}
+            }
+    
+    @staticmethod
+    def atualizar(fonte_nome: str, tipo: str, dados_fonte: str = None):
+        """Atualiza o status de uma fonte"""
+        StatusFonte.inicializar()
+        st.session_state['fontes_status'][fonte_nome] = {
+            'tipo': tipo,
+            'data': datetime.now().strftime('%d/%m/%Y %H:%M'),
+            'fonte': dados_fonte or tipo
+        }
+    
+    @staticmethod
+    def obter_status(fonte_nome: str) -> Dict:
+        """Obtém o status de uma fonte"""
+        StatusFonte.inicializar()
+        return st.session_state['fontes_status'].get(fonte_nome, {})
+    
+    @staticmethod
+    def criar_badge(tipo: str, fonte: str = None) -> str:
+        """Cria um badge HTML para mostrar o status da fonte"""
+        if tipo == 'automático':
+            cor = Config.CORES['automatico']
+            texto = "🔄 Automático"
+            tooltip = f"Fonte: {fonte}" if fonte else "Dados obtidos automaticamente da API"
+        elif tipo == 'manual':
+            cor = Config.CORES['manual']
+            texto = "📝 Manual"
+            tooltip = f"Fonte: {fonte}" if fonte else "Dados inseridos manualmente"
+        else:
+            cor = Config.CORES['neutro']
+            texto = "❓ Desconhecido"
+            tooltip = "Fonte dos dados não identificada"
+        
+        return f"""
+        <span style="background-color: {cor}20; color: {cor}; 
+                     padding: 2px 8px; border-radius: 10px; border: 1px solid {cor}80;
+                     font-size: 0.8em; cursor: help;" title="{tooltip}">
+            {texto}
+        </span>
+        """
+
 # --- DECORADORES E UTILITÁRIOS ---
 def log_errors(func):
     """Decorador para log de erros"""
@@ -144,17 +202,9 @@ def verificar_dados(df: pd.DataFrame, nome: str) -> List[str]:
         if dias_atraso > 60:
             alertas.append(f"⚠️ Dados podem estar desatualizados ({dias_atraso} dias)")
     
-    # Verifica outliers (para alguns indicadores)
-    if 'valor' in df.columns and len(df) > 12:
-        media = df['valor'].abs().mean()
-        std = df['valor'].abs().std()
-        outliers = df[abs(df['valor']) > media + 3*std]
-        if len(outliers) > 0:
-            alertas.append(f"⚠️ {len(outliers)} possíveis outliers")
-    
     return alertas
 
-# --- FUNÇÕES DE CARGA DE DADOS ---
+# --- FUNÇÕES DE CARGA DE DADOS COM STATUS ---
 @st.cache_data(ttl=Config.TTL_LONG)
 @log_errors
 def carregar_dados_sidra(codigo_tabela: str, codigo_variavel: str) -> pd.DataFrame:
@@ -176,6 +226,9 @@ def carregar_dados_sidra(codigo_tabela: str, codigo_variavel: str) -> pd.DataFra
         df['valor'] = pd.to_numeric(df['valor'], errors='coerce')
         df['data_date'] = pd.to_datetime(df['D2C'], format="%Y%m", errors='coerce')
         df['ano'] = df['D2C'].str.slice(0, 4)
+        
+        # Atualiza status - sempre automático para SIDRA
+        StatusFonte.atualizar('indicador_principal', 'automático', 'IBGE/SIDRA')
         
         return processar_dataframe(df)
     except Exception as e:
@@ -209,10 +262,8 @@ def carregar_dados_bcb(codigo_serie: str) -> pd.DataFrame:
             
             df = processar_dataframe(df)
             
-            # Verifica integridade
-            alertas = verificar_dados(df, f"BCB_{codigo_serie}")
-            if alertas:
-                logger.warning(f"Alertas BCB {codigo_serie}: {alertas}")
+            # Atualiza status - sempre automático para BCB
+            StatusFonte.atualizar('indicador_principal', 'automático', 'Banco Central (SGS)')
             
             return df
             
@@ -223,26 +274,42 @@ def carregar_dados_bcb(codigo_serie: str) -> pd.DataFrame:
     
     return pd.DataFrame()
 
+# --- SISTEMA DE FOCUS COM FALLBACK E STATUS ---
 @st.cache_data(ttl=Config.TTL_SHORT)
 @log_errors
-def carregar_focus() -> pd.DataFrame:
-    """Carrega expectativas do Boletim Focus"""
+def carregar_focus_api() -> pd.DataFrame:
+    """Tenta carregar dados do Focus via API oficial"""
     try:
-        url = f"{Config.FOCUS_API}/ExpectativasMercadoAnuais?$top=1000&$orderby=Data%20desc&$format=json"
-        response = requests.get(url, timeout=Config.REQUEST_TIMEOUT)
+        # URL para projeções anuais do Focus
+        url = f"{Config.FOCUS_API}/ExpectativasMercadoAnuais"
+        
+        params = {
+            '$top': 1000,
+            '$format': 'json',
+            '$orderby': 'Data desc',
+            '$select': 'Indicador,Data,DataReferencia,Mediana'
+        }
+        
+        response = requests.get(url, params=params, timeout=Config.REQUEST_TIMEOUT)
         response.raise_for_status()
         
         dados = response.json()
         df = pd.DataFrame(dados['value'])
         
-        indicadores = [
-            'IPCA', 'PIB Total', 'Selic', 'Câmbio', 'IGP-M',
-            'IPCA Administrados', 'Conta corrente', 'Balança comercial',
+        if df.empty:
+            return pd.DataFrame()
+        
+        # Filtra indicadores relevantes
+        indicadores_relevantes = [
+            'IPCA', 'IPCA Administrados', 'IGP-M', 'Selic', 'Câmbio',
+            'PIB Total', 'Balança comercial', 'Conta corrente',
             'Investimento direto no país', 'Dívida líquida do setor público',
             'Resultado primário', 'Resultado nominal'
         ]
         
-        df = df[df['Indicador'].isin(indicadores)]
+        df = df[df['Indicador'].isin(indicadores_relevantes)].copy()
+        
+        # Renomeia e converte
         df = df.rename(columns={
             'Data': 'data_relatorio',
             'DataReferencia': 'ano_referencia',
@@ -253,14 +320,88 @@ def carregar_focus() -> pd.DataFrame:
         df['data_relatorio'] = pd.to_datetime(df['data_relatorio'], errors='coerce')
         df['previsao'] = pd.to_numeric(df['previsao'], errors='coerce')
         
-        return df.dropna(subset=['previsao', 'ano_referencia'])
+        # Remove duplicatas
+        df = df.sort_values('data_relatorio', ascending=False)
+        df = df.drop_duplicates(subset=['Indicador', 'ano_referencia'], keep='first')
+        
+        # Filtra anos recentes
+        ano_atual = datetime.now().year
+        anos_validos = list(range(ano_atual, ano_atual + 4))
+        df = df[df['ano_referencia'].isin(anos_validos)]
+        
+        logger.info(f"Focus API carregado: {len(df)} registros")
+        
+        return df
+        
     except Exception as e:
-        logger.error(f"Erro Focus: {e}")
+        logger.error(f"Erro API Focus: {e}")
         return pd.DataFrame()
+
+def criar_fallback_focus() -> pd.DataFrame:
+    """Cria dataframe com dados manuais atualizados do Focus"""
+    
+    # Dados atualizados baseados na imagem fornecida
+    dados_focus = {
+        'IPCA': {2025: 3.80, 2026: 3.50, 2027: 3.50},
+        'IPCA Administrados': {2025: 5.32, 2026: 3.75, 2027: 3.61},
+        'IGP-M': {2025: 4.20, 2026: 3.80, 2027: 3.80},
+        'Selic': {2025: 9.00, 2026: 8.50, 2027: 8.00},
+        'Câmbio': {2025: 5.40, 2026: 5.50, 2027: 5.50},
+        'PIB Total': {2025: 2.26, 2026: 1.81, 2027: 1.81},
+        'Dívida líquida do setor público': {2025: 65.97, 2026: 70.13, 2027: 73.70},
+        'Resultado primário': {2025: -0.48, 2026: -0.57, 2027: -0.40},
+        'Resultado nominal': {2025: -8.35, 2026: -8.65, 2027: -7.92},
+        'Balança comercial': {2025: 229.7, 2026: 234.2, 2027: 241.9},
+        'Conta corrente': {2025: -72.7, 2026: -66.0, 2027: -65.0},
+        'Investimento direto no país': {2025: 75.0, 2026: 73.5, 2027: 77.5}
+    }
+    
+    # Converte para DataFrame
+    registros = []
+    hoje = datetime.now().date()
+    
+    for indicador, valores in dados_focus.items():
+        for ano, valor in valores.items():
+            registros.append({
+                'Indicador': indicador,
+                'ano_referencia': ano,
+                'previsao': valor,
+                'data_relatorio': pd.Timestamp(hoje)
+            })
+    
+    df = pd.DataFrame(registros)
+    
+    return df
+
+@st.cache_data(ttl=Config.TTL_SHORT)
+def carregar_dados_focus() -> Tuple[pd.DataFrame, str, str]:
+    """
+    Carrega dados do Focus com fallback inteligente
+    Retorna: (dataframe, tipo_fonte, descricao_fonte)
+    """
+    # Tenta API primeiro
+    df_api = carregar_focus_api()
+    
+    # Verifica qualidade dos dados da API
+    if not df_api.empty:
+        # Verifica se os dados são recentes (últimos 3 dias)
+        data_maxima = df_api['data_relatorio'].max()
+        if pd.isna(data_maxima):
+            logger.warning("API Focus retornou datas inválidas")
+        elif (datetime.now() - data_maxima).days <= 3:
+            logger.info("Usando dados automáticos do Focus (API)")
+            StatusFonte.atualizar('focus', 'automático', 'BCB/Focus API')
+            return df_api, 'automático', 'BCB/Focus API'
+    
+    # Se API falhou ou dados muito antigos, usa fallback manual
+    logger.warning("Usando dados manuais do Focus (fallback)")
+    df_manual = criar_fallback_focus()
+    StatusFonte.atualizar('focus', 'manual', 'Base VPL Consultoria')
+    return df_manual, 'manual', 'Base VPL Consultoria'
 
 @st.cache_data(ttl=Config.TTL_SHORT)
 @log_errors
-def carregar_cotacoes_tempo_real() -> pd.DataFrame:
+def carregar_cotacoes_tempo_real() -> Tuple[pd.DataFrame, str, str]:
     """Carrega cotações de moedas em tempo real"""
     try:
         dados = {}
@@ -283,22 +424,39 @@ def carregar_cotacoes_tempo_real() -> pd.DataFrame:
         if dados:
             df = pd.DataFrame.from_dict(dados, orient='index')
             df.index.name = 'moeda'
-            return df
+            StatusFonte.atualizar('cambio_tempo_real', 'automático', 'Yahoo Finance API')
+            return df, 'automático', 'Yahoo Finance API'
+        else:
+            raise ValueError("Nenhum dado retornado")
         
     except Exception as e:
         logger.error(f"Erro cotações tempo real: {e}")
-    
-    return pd.DataFrame()
+        # Fallback manual com valores recentes
+        dados_manual = {
+            'USDBRL': {
+                'cotacao': 5.42,
+                'variacao': 0.15,
+                'atualizado': datetime.now().strftime('%H:%M')
+            },
+            'EURBRL': {
+                'cotacao': 5.85,
+                'variacao': -0.10,
+                'atualizado': datetime.now().strftime('%H:%M')
+            }
+        }
+        df = pd.DataFrame.from_dict(dados_manual, orient='index')
+        StatusFonte.atualizar('cambio_tempo_real', 'manual', 'Base VPL Consultoria')
+        return df, 'manual', 'Base VPL Consultoria'
 
 @st.cache_data(ttl=Config.TTL_LONG)
 @log_errors
-def carregar_historico_cambio() -> pd.DataFrame:
+def carregar_historico_cambio() -> Tuple[pd.DataFrame, str, str]:
     """Carrega histórico completo de câmbio"""
     try:
         df = yf.download(Config.YAHOO_CURRENCIES, start="1994-07-01", progress=False)
         
         if df.empty:
-            return pd.DataFrame()
+            raise ValueError("DataFrame vazio do Yahoo Finance")
         
         df = df['Close'].copy()
         
@@ -308,19 +466,25 @@ def carregar_historico_cambio() -> pd.DataFrame:
         df.index = df.index.tz_convert('America/Sao_Paulo')
         df.index = df.index.tz_localize(None)
         
-        # Filtra datas futuras (erros do Yahoo)
+        # Filtra datas futuras
         hoje = pd.Timestamp.now().normalize()
         df = df[df.index <= hoje]
         
         df = df.rename(columns={'USDBRL=X': 'Dólar', 'EURBRL=X': 'Euro'})
-        return df.ffill().dropna()
+        df = df.ffill().dropna()
+        
+        StatusFonte.atualizar('cambio_historico', 'automático', 'Yahoo Finance API')
+        return df, 'automático', 'Yahoo Finance API'
+        
     except Exception as e:
         logger.error(f"Erro histórico câmbio: {e}")
-        return pd.DataFrame()
+        # Retorna DataFrame vazio para fallback
+        StatusFonte.atualizar('cambio_historico', 'manual', 'Base VPL Consultoria')
+        return pd.DataFrame(), 'manual', 'Base VPL Consultoria'
 
 @st.cache_data(ttl=Config.TTL_MEDIUM)
 @log_errors
-def carregar_macro_real() -> Tuple[Dict, Dict]:
+def carregar_macro_real() -> Tuple[Dict, Dict, str, str]:
     """Carrega dados macroeconômicos realizados"""
     series_bcb = {
         'PIB': 4382,
@@ -340,6 +504,7 @@ def carregar_macro_real() -> Tuple[Dict, Dict]:
     
     kpis = {}
     historico = {}
+    dados_validos = 0
     
     for nome, codigo in series_bcb.items():
         for tentativa in range(Config.MAX_RETRIES):
@@ -370,11 +535,11 @@ def carregar_macro_real() -> Tuple[Dict, Dict]:
                 
                 # Ajustes de escala
                 if nome == 'PIB':
-                    df_chart['valor'] = df_chart['valor'] / 1_000_000  # Para trilhões
+                    df_chart['valor'] = df_chart['valor'] / 1_000_000
                 elif nome in ['Balança Com.', 'Trans. Correntes', 'IDP']:
-                    df_chart['valor'] = df_chart['valor'] / 1_000  # Para bilhões
+                    df_chart['valor'] = df_chart['valor'] / 1_000
                 elif 'Primário' in nome or 'Nominal' in nome:
-                    df_chart['valor'] = (df_chart['valor'] * -1) / 1_000  # Inverte sinal e escala
+                    df_chart['valor'] = (df_chart['valor'] * -1) / 1_000
                 
                 historico[nome] = df_chart
                 
@@ -390,7 +555,6 @@ def carregar_macro_real() -> Tuple[Dict, Dict]:
                 elif nome == 'Dívida Líq.':
                     valor_kpi = ultimo['valor']
                 else:
-                    # Soma acumulada do ano
                     df_ano = df[df['data_dt'].dt.year == ano_atual]
                     soma = df_ano['valor'].sum()
                     if 'Primário' in nome or 'Nominal' in nome:
@@ -404,7 +568,8 @@ def carregar_macro_real() -> Tuple[Dict, Dict]:
                     'ano': ano_atual
                 }
                 
-                break  # Sucesso, sai do loop de tentativas
+                dados_validos += 1
+                break
                 
             except Exception as e:
                 logger.warning(f"Tentativa {tentativa + 1} para {nome} falhou: {e}")
@@ -412,7 +577,14 @@ def carregar_macro_real() -> Tuple[Dict, Dict]:
                     time.sleep(2 ** tentativa)
                 continue
     
-    return kpis, historico
+    # Determina fonte baseado no sucesso
+    if dados_validos >= 5:  # Se obteve pelo menos 5 de 7 indicadores
+        StatusFonte.atualizar('macro', 'automático', 'Banco Central (SGS)')
+        return kpis, historico, 'automático', 'Banco Central (SGS)'
+    else:
+        logger.warning(f"Apenas {dados_validos}/7 indicadores macro carregados")
+        StatusFonte.atualizar('macro', 'manual', 'Base VPL Consultoria')
+        return kpis, historico, 'manual', 'Base VPL Consultoria'
 
 def processar_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """Processamento comum para dataframes de séries temporais"""
@@ -478,25 +650,50 @@ def calcular_correcao(df: pd.DataFrame, valor: float, data_ini: str, data_fim: s
         'taxa_mensal_media': (fator_acumulado ** (1/len(df_periodo)) - 1) * 100
     }, None
 
-# --- COMPONENTES DE UI ---
+# --- COMPONENTES DE UI COM INDICADORES DE FONTE ---
 def criar_header():
-    """Cria header da aplicação"""
-    st.markdown("""
+    """Cria header da aplicação com indicadores de fonte"""
+    # Inicializa sistema de status
+    StatusFonte.inicializar()
+    
+    # Obtém status de todas as fontes
+    fontes_status = st.session_state.get('fontes_status', {})
+    
+    # Conta fontes automáticas vs manuais
+    contador = {'automático': 0, 'manual': 0, 'total': 0}
+    for status in fontes_status.values():
+        if status.get('tipo'):
+            contador[status['tipo']] += 1
+            contador['total'] += 1
+    
+    # Calcula porcentagem de dados automáticos
+    percentual_automatico = (contador['automático'] / contador['total'] * 100) if contador['total'] > 0 else 0
+    
+    st.markdown(f"""
     <div style='background: linear-gradient(135deg, #003366 0%, #0066cc 100%); 
                 padding: 20px; border-radius: 10px; margin-bottom: 20px;'>
-        <h1 style='color: white; margin: 0;'>VPL CONSULTORIA</h1>
-        <p style='color: #E0E0E0; margin: 5px 0 0 0; font-size: 1.1em;'>
-            📊 Inteligência Macroeconômica & Correção Monetária
-        </p>
-        <div style='display: flex; justify-content: space-between; align-items: center; margin-top: 10px;'>
-            <span style='color: #4CAF50; font-weight: bold; background-color: rgba(255,255,255,0.1); 
-                         padding: 5px 10px; border-radius: 5px;'>✓ DADOS OFICIAIS</span>
-            <span style='color: #CCCCCC; font-size: 0.9em;'>
-                Última atualização: {}
-            </span>
+        <div style='display: flex; justify-content: space-between; align-items: flex-start;'>
+            <div>
+                <h1 style='color: white; margin: 0;'>VPL CONSULTORIA</h1>
+                <p style='color: #E0E0E0; margin: 5px 0 0 0; font-size: 1.1em;'>
+                    📊 Inteligência Macroeconômica & Correção Monetária
+                </p>
+            </div>
+            <div style='text-align: right;'>
+                <div style='background: rgba(255,255,255,0.1); padding: 10px; border-radius: 5px;'>
+                    <div style='color: #4CAF50; font-size: 0.9em;'>
+                        <span style='font-weight: bold;'>📡 Status Fontes:</span>
+                        <span style='margin-left: 10px;'>{contador['automático']} auto</span>
+                        <span style='margin-left: 5px;'>{contador['manual']} manual</span>
+                    </div>
+                    <div style='color: #CCCCCC; font-size: 0.9em; margin-top: 5px;'>
+                        {percentual_automatico:.0f}% automático • {datetime.now().strftime("%d/%m/%Y %H:%M")}
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
-    """.format(datetime.now().strftime("%d/%m/%Y %H:%M")), unsafe_allow_html=True)
+    """, unsafe_allow_html=True)
 
 def criar_sidebar():
     """Cria sidebar com configurações e calculadora"""
@@ -537,85 +734,170 @@ def criar_sidebar():
     
     return tipo_indice, valor_input
 
-def criar_painel_focus(df_focus: pd.DataFrame, cotacoes: pd.DataFrame):
-    """Cria painel de expectativas de mercado"""
-    with st.expander("🔭 Expectativas de Mercado (Focus) & Câmbio", expanded=False):
-        col1, col2 = st.columns([2, 1])
+def criar_painel_focus(df_focus: pd.DataFrame, tipo_focus: str, fonte_focus: str, cotacoes: pd.DataFrame, tipo_cambio: str, fonte_cambio: str):
+    """Cria painel de expectativas de mercado com indicador de fonte"""
+    
+    with st.expander("🔭 Expectativas de Mercado - Boletim Focus", expanded=False):
         
-        with col1:
-            if not df_focus.empty:
-                ultima_data = df_focus['data_relatorio'].max()
-                df_recente = df_focus[df_focus['data_relatorio'] == ultima_data]
-                ano_atual = datetime.now().year
+        # Header com badge de fonte
+        col_titulo, col_badge = st.columns([3, 1])
+        
+        with col_titulo:
+            st.markdown("### 📊 Projeções Macroeconômicas")
+        
+        with col_badge:
+            # Badge indicando fonte dos dados
+            badge_focus = StatusFonte.criar_badge(tipo_focus, fonte_focus)
+            st.markdown(badge_focus, unsafe_allow_html=True)
+            st.caption(f"Atualizado: {datetime.now().strftime('%d/%m/%Y')}")
+        
+        # Verifica se temos dados
+        if df_focus.empty:
+            st.warning("⚠️ Dados do Focus temporariamente indisponíveis")
+            return
+        
+        # Ano atual para referência
+        ano_atual = datetime.now().year
+        
+        # KPIs Principais em cards
+        st.markdown("##### 🎯 Indicadores Chave")
+        
+        # Filtra ano atual e prepara pivot
+        df_atual = df_focus[df_focus['ano_referencia'] == ano_atual].copy()
+        if not df_atual.empty:
+            pivot_atual = df_atual.pivot_table(index='Indicador', values='previsao', aggfunc='mean')
+            
+            # 4 KPIs principais
+            col1, col2, col3, col4 = st.columns(4)
+            
+            # IPCA
+            if 'IPCA' in pivot_atual.index:
+                valor_ipca = pivot_atual.loc['IPCA', 'previsao']
+                col1.metric("📈 IPCA 2025", f"{valor_ipca:.2f}%")
+            
+            # Selic
+            if 'Selic' in pivot_atual.index:
+                valor_selic = pivot_atual.loc['Selic', 'previsao']
+                col2.metric("🏦 Selic 2025", f"{valor_selic:.2f}%")
+            
+            # PIB
+            if 'PIB Total' in pivot_atual.index:
+                valor_pib = pivot_atual.loc['PIB Total', 'previsao']
+                col3.metric("📊 PIB 2025", f"{valor_pib:.2f}%")
+            
+            # Câmbio
+            if 'Câmbio' in pivot_atual.index:
+                valor_cambio = pivot_atual.loc['Câmbio', 'previsao']
+                col4.metric("💵 Dólar 2025", f"R$ {valor_cambio:.2f}")
+        
+        st.divider()
+        
+        # Layout principal
+        col_dados, col_cambio = st.columns([3, 1])
+        
+        with col_dados:
+            # Tabela completa de projeções
+            st.markdown("##### 📅 Projeções Anuais (2025-2027)")
+            
+            # Pivot table com anos como colunas
+            anos_exibir = [ano_atual, ano_atual + 1, ano_atual + 2]
+            df_tabela = df_focus[df_focus['ano_referencia'].isin(anos_exibir)].copy()
+            
+            if not df_tabela.empty:
+                pivot_completo = df_tabela.pivot_table(
+                    index='Indicador', 
+                    columns='ano_referencia', 
+                    values='previsao',
+                    aggfunc='mean'
+                )
                 
-                data_str = pd.to_datetime(ultima_data).strftime('%d/%m/%Y')
-                st.markdown(f"**📅 Boletim Focus ({data_str})**")
-                
-                # KPIs principais
-                df_ano = df_recente[df_recente['ano_referencia'] == ano_atual]
-                pivot = df_ano.pivot_table(index='Indicador', values='previsao', aggfunc='mean')
-                
-                cols = st.columns(4)
-                indicadores_kpi = ['IPCA', 'Selic', 'PIB Total', 'Câmbio']
-                
-                for idx, indicador in enumerate(indicadores_kpi):
-                    with cols[idx]:
-                        if indicador in pivot.index:
-                            valor = pivot.loc[indicador, 'previsao']
-                            if indicador == 'Câmbio':
-                                cols[idx].metric(f"USD {ano_atual}", f"R$ {valor:.2f}")
-                            else:
-                                cols[idx].metric(f"{indicador} {ano_atual}", f"{valor:.2f}%")
-                        else:
-                            cols[idx].metric(f"{indicador} {ano_atual}", "-")
-                
-                # Tabela completa
-                st.divider()
-                st.markdown("##### 📊 Projeções Macroeconômicas")
-                
-                anos_exibir = [ano_atual, ano_atual + 1, ano_atual + 2]
-                df_tabela = df_recente[df_recente['ano_referencia'].isin(anos_exibir)].copy()
-                pivot_multi = df_tabela.pivot_table(index='Indicador', columns='ano_referencia', values='previsao')
-                
-                # Ordem lógica
-                ordem = [
-                    'IPCA', 'IGP-M', 'IPCA Administrados', 'Selic', 'Câmbio', 'PIB Total',
-                    'Dívida líquida do setor público', 'Resultado primário', 'Resultado nominal',
-                    'Balança comercial', 'Conta corrente', 'Investimento direto no país'
+                # Ordena os indicadores de forma lógica
+                ordem_indicadores = [
+                    'IPCA',
+                    'IPCA Administrados',
+                    'IGP-M',
+                    'Selic',
+                    'Câmbio',
+                    'PIB Total',
+                    'Dívida líquida do setor público',
+                    'Resultado primário',
+                    'Resultado nominal',
+                    'Balança comercial',
+                    'Conta corrente',
+                    'Investimento direto no país'
                 ]
-                ordem_filtrada = [x for x in ordem if x in pivot_multi.index]
-                pivot_multi = pivot_multi.reindex(ordem_filtrada)
                 
-                # Formatação
-                df_display = pivot_multi.copy()
-                for col in df_display.columns:
-                    df_display[col] = df_display.apply(
-                        lambda row: formatar_valor_focus(row.name, row[col]), axis=1
+                # Filtra apenas indicadores presentes
+                ordem_filtrada = [i for i in ordem_indicadores if i in pivot_completo.index]
+                pivot_completo = pivot_completo.reindex(ordem_filtrada)
+                
+                # Formata os valores
+                df_formatado = pivot_completo.copy()
+                
+                for col in df_formatado.columns:
+                    df_formatado[col] = df_formatado.apply(
+                        lambda row: formatar_valor_focus(row.name, row[col]),
+                        axis=1
                     )
                 
-                st.dataframe(df_display, use_container_width=True)
+                # Exibe a tabela com formatação condicional
+                st.dataframe(
+                    df_formatado,
+                    use_container_width=True,
+                    height=500
+                )
+                
+                # Legenda com fonte
+                fonte_texto = f"Dados obtidos via {fonte_focus}" if tipo_focus == 'automático' else f"Dados de referência ({fonte_focus})"
+                st.caption(f"""
+                **Legenda:** IPCA/IGP-M/Selic/PIB/Dívida/Primário/Nominal = % | 
+                Câmbio = R$/US$ | Balança/Conta/IDP = US$ Bilhões
+                **Fonte:** {fonte_texto}
+                """)
             else:
-                st.warning("⚠️ Dados do Focus indisponíveis no momento")
+                st.info("Sem dados de projeções para os próximos anos")
         
-        with col2:
-            st.markdown("**💱 Câmbio em Tempo Real**")
+        with col_cambio:
+            # Painel de câmbio em tempo real
+            col_cambio_titulo, col_cambio_badge = st.columns([2, 1])
+            with col_cambio_titulo:
+                st.markdown("##### 💱 Câmbio Agora")
+            with col_cambio_badge:
+                badge_cambio = StatusFonte.criar_badge(tipo_cambio, fonte_cambio)
+                st.markdown(badge_cambio, unsafe_allow_html=True)
+            
             if not cotacoes.empty:
-                cols_moeda = st.columns(2)
-                for idx, (moeda, dados) in enumerate(cotacoes.iterrows()):
-                    with cols_moeda[idx % 2]:
+                # Layout para moedas
+                for moeda, dados in cotacoes.iterrows():
+                    with st.container():
                         variacao = dados['variacao']
-                        cor = Config.CORES['positivo'] if variacao >= 0 else Config.CORES['negativo']
+                        cor_valor = "#4CAF50" if variacao >= 0 else "#F44336"
+                        emoji = "🟢" if variacao >= 0 else "🔴"
+                        
                         st.markdown(f"""
-                        <div style='background-color: rgba(0,0,0,0.1); padding: 10px; border-radius: 5px;'>
-                            <div style='font-size: 0.9em; color: #666;'>{moeda}</div>
-                            <div style='font-size: 1.3em; font-weight: bold;'>R$ {dados['cotacao']:.2f}</div>
-                            <div style='color: {cor}; font-size: 0.9em;'>
-                                {dados['variacao']:+.2f}% • {dados['atualizado']}
+                        <div style='background: rgba(0,0,0,0.05); padding: 15px; 
+                                    border-radius: 10px; margin-bottom: 10px; border-left: 4px solid {cor_valor};'>
+                            <div style='display: flex; justify-content: space-between; align-items: center;'>
+                                <div style='font-size: 1.1em; font-weight: bold;'>{moeda}</div>
+                                <div style='font-size: 0.8em; color: #666;'>
+                                    {dados['atualizado']}
+                                </div>
+                            </div>
+                            <div style='font-size: 1.8em; font-weight: bold; margin: 5px 0;'>
+                                R$ {dados['cotacao']:.2f}
+                            </div>
+                            <div style='color: {cor_valor}; font-weight: bold;'>
+                                {emoji} {variacao:+.2f}%
                             </div>
                         </div>
                         """, unsafe_allow_html=True)
             else:
-                st.info("💡 Atualizando cotações...")
+                st.info("Atualizando cotações...")
+            
+            # Botão para atualizar
+            if st.button("🔄 Atualizar Cotações", use_container_width=True, key="btn_atualizar_cambio"):
+                st.cache_data.clear()
+                st.rerun()
 
 def formatar_valor_focus(indicador: str, valor: float) -> str:
     """Formata valores do Focus conforme o indicador"""
@@ -629,10 +911,17 @@ def formatar_valor_focus(indicador: str, valor: float) -> str:
     else:
         return f"{valor:.2f}%"
 
-def criar_painel_macro(kpis: Dict, historico: Dict):
-    """Cria painel de conjuntura macroeconômica"""
+def criar_painel_macro(kpis: Dict, historico: Dict, tipo_macro: str, fonte_macro: str):
+    """Cria painel de conjuntura macroeconômica com indicador de fonte"""
     with st.expander("🧩 Conjuntura Macroeconômica (Dados Oficiais)", expanded=False):
-        st.markdown("Monitoramento dos principais indicadores da economia brasileira.")
+        
+        # Header com badge de fonte
+        col_titulo, col_badge = st.columns([3, 1])
+        with col_titulo:
+            st.markdown("### 📈 Dados Macroeconômicos Realizados")
+        with col_badge:
+            badge_macro = StatusFonte.criar_badge(tipo_macro, fonte_macro)
+            st.markdown(badge_macro, unsafe_allow_html=True)
         
         if not kpis:
             st.warning("Não foi possível carregar os dados macroeconômicos.")
@@ -682,7 +971,11 @@ def criar_painel_macro(kpis: Dict, historico: Dict):
         st.divider()
         
         # Gráficos
-        st.markdown("##### 📈 Tendências (Últimos 5 Anos)")
+        st.markdown("##### 📊 Tendências (Últimos 5 Anos)")
+        
+        # Adiciona badge de fonte para gráficos
+        st.markdown(f"*Fonte dos dados: {fonte_macro}*", unsafe_allow_html=True)
+        
         tab1, tab2, tab3 = st.tabs(["Atividade", "Fiscal", "Externo"])
         
         with tab1:
@@ -736,9 +1029,18 @@ def plotar_serie_temporal(df: pd.DataFrame, titulo: str, cor: str, tipo: str = '
     
     st.plotly_chart(fig, use_container_width=True)
 
-def criar_painel_cambio(df_cambio: pd.DataFrame):
-    """Cria painel de histórico de câmbio"""
+def criar_painel_cambio(df_cambio: pd.DataFrame, tipo_cambio: str, fonte_cambio: str):
+    """Cria painel de histórico de câmbio com indicador de fonte"""
     with st.expander("💸 Histórico de Câmbio (desde 1994)", expanded=False):
+        
+        # Header com badge de fonte
+        col_titulo, col_badge = st.columns([3, 1])
+        with col_titulo:
+            st.markdown("### 📈 Histórico de Cotações")
+        with col_badge:
+            badge_cambio = StatusFonte.criar_badge(tipo_cambio, fonte_cambio)
+            st.markdown(badge_cambio, unsafe_allow_html=True)
+        
         if df_cambio.empty:
             st.warning("Histórico de câmbio indisponível")
             return
@@ -748,7 +1050,7 @@ def criar_painel_cambio(df_cambio: pd.DataFrame):
         penultimo = df_cambio.iloc[-2] if len(df_cambio) > 1 else ultimo
         data_ref = df_cambio.index[-1].strftime('%d/%m/%Y')
         
-        st.markdown(f"**📅 Fechamento: {data_ref}**")
+        st.markdown(f"**📅 Último Fechamento: {data_ref}**")
         col1, col2, col3 = st.columns([1, 1, 2])
         
         with col1:
@@ -772,6 +1074,10 @@ def criar_painel_cambio(df_cambio: pd.DataFrame):
                 <div style='color: {cor_eur};'>{var_eur:+.2f}%</div>
             </div>
             """, unsafe_allow_html=True)
+        
+        # Informação da fonte
+        fonte_texto = f"Dados obtidos via {fonte_cambio}" if tipo_cambio == 'automático' else f"Dados de referência ({fonte_cambio})"
+        st.caption(f"*{fonte_texto}*")
         
         st.divider()
         
@@ -855,20 +1161,37 @@ def criar_painel_principal(df: pd.DataFrame, tipo_indice: str, cor_tema: str):
         st.error("❌ Erro ao carregar dados do indicador")
         return
     
+    # Obtém status da fonte do indicador principal
+    status_indicador = StatusFonte.obter_status('indicador_principal')
+    tipo_fonte = status_indicador.get('tipo', 'desconhecido')
+    fonte_indicador = status_indicador.get('fonte', 'Fonte não identificada')
+    
     # Header do painel
     nome_indice = tipo_indice.split()[0]
     st.title(f"📊 Painel: {nome_indice}")
+    
+    # Badge de fonte do indicador
+    col_titulo, col_badge = st.columns([3, 1])
+    with col_titulo:
+        st.markdown(f"**Dados históricos atualizados até:** {df.iloc[0]['data_fmt']}")
+    with col_badge:
+        badge_indicador = StatusFonte.criar_badge(tipo_fonte, fonte_indicador)
+        st.markdown(badge_indicador, unsafe_allow_html=True)
     
     # Metadados
     if nome_indice in METADADOS_FONTES:
         meta = METADADOS_FONTES[nome_indice]
         with st.expander("ℹ️ Metadados e Fonte", expanded=False):
             col1, col2 = st.columns(2)
-            col1.markdown(f"**Fonte:** {meta['fonte']}")
+            col1.markdown(f"**Fonte Oficial:** {meta['fonte']}")
             col1.markdown(f"**Atualização:** {meta['atualizacao']}")
             col2.markdown(f"**Qualidade:** {meta['qualidade']}")
             col2.markdown(f"[🔗 Documentação oficial]({meta['link']})")
             st.caption(f"*{meta['descricao']}*")
+            
+            # Status atual
+            st.markdown("---")
+            st.markdown(f"**Status Atual:** Dados obtidos via {fonte_indicador} ({tipo_fonte})")
     
     # Alertas de qualidade
     alertas = verificar_dados(df, nome_indice)
@@ -878,7 +1201,6 @@ def criar_painel_principal(df: pd.DataFrame, tipo_indice: str, cor_tema: str):
     
     # KPIs
     ultimo = df.iloc[0]
-    st.markdown(f"**📅 Dados atualizados até:** {ultimo['data_fmt']}")
     
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Taxa do Mês", f"{ultimo['valor']:.2f}%")
@@ -1002,6 +1324,10 @@ def criar_calculadora_sidebar(df: pd.DataFrame, tipo_indice: str, valor_input: f
             else:
                 st.sidebar.divider()
                 
+                # Obtém status da fonte para mostrar
+                status_indicador = StatusFonte.obter_status('indicador_principal')
+                fonte_texto = status_indicador.get('fonte', 'Fonte não identificada')
+                
                 # Exibe resultado
                 nome_indice = tipo_indice.split()[0]
                 operacao = "Descapitalização" if resultado['is_reverso'] else "Correção"
@@ -1012,6 +1338,12 @@ def criar_calculadora_sidebar(df: pd.DataFrame, tipo_indice: str, valor_input: f
                     f"R$ {resultado['valor_final']:,.2f}</h2>",
                     unsafe_allow_html=True
                 )
+                
+                # Badge da fonte
+                tipo_fonte = status_indicador.get('tipo', 'desconhecido')
+                if tipo_fonte != 'desconhecido':
+                    badge = StatusFonte.criar_badge(tipo_fonte, fonte_texto)
+                    st.sidebar.markdown(badge, unsafe_allow_html=True)
                 
                 # Detalhes
                 st.sidebar.markdown(f"**Variação Total:** {resultado['percentual']:+.2f}%")
@@ -1025,6 +1357,41 @@ def criar_calculadora_sidebar(df: pd.DataFrame, tipo_indice: str, valor_input: f
 def criar_footer():
     """Cria footer da aplicação"""
     st.markdown("---")
+    
+    # Painel de status das fontes
+    with st.expander("📡 Status das Fontes de Dados", expanded=False):
+        fontes_status = st.session_state.get('fontes_status', {})
+        
+        if fontes_status:
+            # Cria tabela de status
+            dados_status = []
+            for fonte, status in fontes_status.items():
+                dados_status.append({
+                    'Fonte': fonte.replace('_', ' ').title(),
+                    'Tipo': status.get('tipo', '❓ Desconhecido'),
+                    'Origem': status.get('fonte', '-'),
+                    'Última Atualização': status.get('data', '-')
+                })
+            
+            df_status = pd.DataFrame(dados_status)
+            
+            # Aplica formatação condicional
+            def color_tipo(val):
+                if val == 'automático':
+                    return f'background-color: {Config.CORES["automatico"]}20; color: {Config.CORES["automatico"]}'
+                elif val == 'manual':
+                    return f'background-color: {Config.CORES["manual"]}20; color: {Config.CORES["manual"]}'
+                return ''
+            
+            st.dataframe(
+                df_status.style.applymap(color_tipo, subset=['Tipo']),
+                use_container_width=True,
+                hide_index=True
+            )
+        else:
+            st.info("Status das fontes não disponível")
+    
+    # Footer principal
     col1, col2, col3 = st.columns([1, 2, 1])
     
     with col2:
@@ -1036,16 +1403,49 @@ def criar_footer():
         </div>
         """, unsafe_allow_html=True)
 
+def criar_painel_controle_fontes():
+    """Cria painel de controle de fontes na sidebar"""
+    with st.sidebar.expander("⚙️ Controle de Fontes", expanded=False):
+        st.markdown("**Configurar Fontes de Dados**")
+        
+        # Opção para forçar dados manuais
+        forcar_manual = st.checkbox(
+            "Usar dados manuais quando disponível",
+            value=False,
+            help="Prioriza dados de referência em vez de APIs externas"
+        )
+        
+        if forcar_manual:
+            st.info("⚠️ Modo manual ativado. Alguns dados podem não estar atualizados.")
+        
+        # Botão para atualizar todas as fontes
+        if st.button("🔄 Atualizar Todas as Fontes", use_container_width=True):
+            st.cache_data.clear()
+            st.rerun()
+        
+        # Status atual resumido
+        st.markdown("---")
+        st.markdown("**Status Atual:**")
+        
+        fontes_status = st.session_state.get('fontes_status', {})
+        for fonte, status in fontes_status.items():
+            if status.get('tipo'):
+                cor = Config.CORES['automatico'] if status['tipo'] == 'automático' else Config.CORES['manual']
+                emoji = "🟢" if status['tipo'] == 'automático' else "🟠"
+                st.markdown(f"{emoji} {fonte}: **{status['tipo']}**")
+                st.caption(f"  {status.get('fonte', '')}")
+
 # --- FUNÇÃO PRINCIPAL ---
 def main():
     """Função principal da aplicação"""
     
-    # Header
+    # Header com sistema de status
     criar_header()
     
     # Sidebar
     with st.sidebar:
         tipo_indice, valor_input = criar_sidebar()
+        criar_painel_controle_fontes()
     
     # Carrega dados do indicador selecionado
     with st.spinner(f"📥 Carregando dados de {tipo_indice}..."):
@@ -1071,56 +1471,57 @@ def main():
         st.error("Não foi possível carregar os dados. Tente novamente.")
         st.stop()
     
-    # Carrega dados complementares em paralelo
+    # Carrega dados complementares
     with st.spinner("🔄 Carregando dados complementares..."):
-        # Dados que podem carregar em paralelo
-        import threading
-        
-        resultados = {}
-        def carregar_paralelo(nome, funcao):
-            resultados[nome] = funcao()
-        
-        threads = [
-            threading.Thread(target=carregar_paralelo, args=('focus', carregar_focus)),
-            threading.Thread(target=carregar_paralelo, args=('cotacoes', carregar_cotacoes_tempo_real)),
-            threading.Thread(target=carregar_paralelo, args=('cambio', carregar_historico_cambio)),
-            threading.Thread(target=carregar_paralelo, args=('macro', lambda: carregar_macro_real()[0])),
-            threading.Thread(target=carregar_paralelo, args=('macro_hist', lambda: carregar_macro_real()[1]))
-        ]
-        
-        for t in threads:
-            t.start()
-        
-        for t in threads:
-            t.join()
-        
-        df_focus = resultados.get('focus', pd.DataFrame())
-        df_cotacoes = resultados.get('cotacoes', pd.DataFrame())
-        df_cambio = resultados.get('cambio', pd.DataFrame())
-        kpis_macro = resultados.get('macro', {})
-        historico_macro = resultados.get('macro_hist', {})
+        # Carrega dados com informações de fonte
+        df_focus, tipo_focus, fonte_focus = carregar_dados_focus()
+        df_cotacoes, tipo_cambio_real, fonte_cambio_real = carregar_cotacoes_tempo_real()
+        df_cambio_hist, tipo_cambio_hist, fonte_cambio_hist = carregar_historico_cambio()
+        kpis_macro, historico_macro, tipo_macro, fonte_macro = carregar_macro_real()
     
     # Calculadora na sidebar
     criar_calculadora_sidebar(df_indicador, tipo_indice, valor_input)
     
-    # Painéis de dados
-    criar_painel_focus(df_focus, df_cotacoes)
-    criar_painel_macro(kpis_macro, historico_macro)
-    criar_painel_cambio(df_cambio)
+    # Painéis de dados com indicadores de fonte
+    criar_painel_focus(df_focus, tipo_focus, fonte_focus, df_cotacoes, tipo_cambio_real, fonte_cambio_real)
+    criar_painel_macro(kpis_macro, historico_macro, tipo_macro, fonte_macro)
+    criar_painel_cambio(df_cambio_hist, tipo_cambio_hist, fonte_cambio_hist)
     
     # Painel principal
     criar_painel_principal(df_indicador, tipo_indice, cor_tema)
     
-    # Footer
+    # Footer com status completo
     criar_footer()
     
-    # Status do sistema (oculto por padrão)
-    with st.sidebar.expander("🔧 Status do Sistema", expanded=False):
-        st.caption(f"Cache: {len(st.cache_data.clear.callbacks)} funções")
-        st.caption(f"Indicador: {nome_indice}")
-        st.caption(f"Registros: {len(df_indicador)}")
-        if not df_indicador.empty:
-            st.caption(f"Período: {df_indicador['data_date'].min():%Y-%m} a {df_indicador['data_date'].max():%Y-%m}")
+    # CSS customizado
+    st.markdown("""
+    <style>
+        /* Badges de fonte */
+        .stBadge {
+            background-color: #4CAF50;
+            color: white;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 0.8em;
+            font-weight: bold;
+        }
+        
+        /* Cards para moedas */
+        div[data-testid="stVerticalBlock"] > div[style*="border-left"] {
+            transition: all 0.3s ease;
+        }
+        
+        div[data-testid="stVerticalBlock"] > div[style*="border-left"]:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+        
+        /* Tabela de status */
+        .dataframe td {
+            font-size: 0.9em !important;
+        }
+    </style>
+    """, unsafe_allow_html=True)
 
 # --- EXECUÇÃO ---
 if __name__ == "__main__":

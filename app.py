@@ -163,54 +163,63 @@ def processar_dataframe_comum(df):
     df['acum_12m'] = (df['fator'].rolling(window=12).apply(np.prod, raw=True) - 1) * 100
     return df.sort_values('data_date', ascending=False)
 
-# 7. Dados Macroeconômicos Reais (Com Datas)
+# 7. Dados Macroeconômicos Reais (Versão Robusta/Blindada)
 @st.cache_data(ttl=3600)
 def get_macro_real():
+    # Códigos das Séries do Banco Central (SGS)
     series = {
-        'PIB': 4382,
-        'Dívida Líq.': 4513,
-        'Res. Primário': 5362,
-        'Res. Nominal': 5360,
-        'Balança Com.': 22707,
-        'Trans. Correntes': 22724,
-        'IDP': 22885
+        'PIB': 4382,           # PIB Acum. 12 meses (R$ Mi)
+        'Dívida Líq.': 4513,   # Dívida Líq. Setor Público (% PIB)
+        'Res. Primário': 5362, # NFSP Primário (% PIB)
+        'Res. Nominal': 5360,  # NFSP Nominal (% PIB)
+        'Balança Com.': 22707, # Saldo Comercial (US$ Mi)
+        'Trans. Correntes': 22724, # Saldo Trans. Correntes (US$ Mi)
+        'IDP': 22885           # IDP (US$ Mi)
     }
     
     resultados = {}
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'
+    }
     
-    # Mapa de meses para garantir português
     mapa_meses = {'01':'jan', '02':'fev', '03':'mar', '04':'abr', '05':'mai', '06':'jun',
                   '07':'jul', '08':'ago', '09':'set', '10':'out', '11':'nov', '12':'dez'}
     
-    try:
-        for nome, codigo in series.items():
+    # Loop Blindado: Se um falhar, os outros continuam
+    for nome, codigo in series.items():
+        try:
             url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo}/dados/ultimos/13?formato=json"
-            resp = requests.get(url, headers=headers, verify=False, timeout=5)
+            # Timeout aumentado para 10s e verify=False para evitar erro de SSL
+            resp = requests.get(url, headers=headers, verify=False, timeout=10)
+            resp.raise_for_status() # Garante que baixou (Status 200)
+            
             df = pd.DataFrame(resp.json())
             df['valor'] = pd.to_numeric(df['valor'])
             
-            # --- CAPTURA E FORMATAÇÃO DA DATA ---
-            # Pega a data do último registro
-            data_raw = df['data'].iloc[-1] # Vem como dd/mm/aaaa
+            # --- CAPTURA DATA ---
+            data_raw = df['data'].iloc[-1]
             dia, mes, ano = data_raw.split('/')
-            data_curta = f"{mapa_meses[mes]}/{ano[2:]}" # Ex: out/25
-            # ------------------------------------
-
+            data_curta = f"{mapa_meses[mes]}/{ano[2:]}"
+            
+            # --- LÓGICA DE VALORES ---
+            valor = 0
             if nome == 'PIB':
-                valor = df['valor'].iloc[-1] / 1_000_000 # Trilhões
+                valor = df['valor'].iloc[-1] / 1_000_000 # R$ Milhões -> Trilhões
             elif nome in ['Balança Com.', 'Trans. Correntes', 'IDP']:
-                valor = df['valor'].iloc[-12:].sum() / 1_000 # Bilhões (Soma 12m)
+                valor = df['valor'].iloc[-12:].sum() / 1_000 # Soma 12m e converte para US$ Bi
             elif 'Primário' in nome or 'Nominal' in nome:
-                valor = df['valor'].iloc[-1] * -1 # Inverte sinal
+                valor = df['valor'].iloc[-1] * -1 # Inverte sinal (BC usa + para déficit)
             else:
-                valor = df['valor'].iloc[-1] # Dívida
+                valor = df['valor'].iloc[-1] # Dívida (% PIB) direto
                 
             resultados[nome] = {'valor': valor, 'data': data_curta}
             
-        return resultados
-    except Exception as e:
-        return {}
+        except Exception as e:
+            print(f"Erro ao baixar indicador {nome}: {e}")
+            # Não faz nada, apenas pula este indicador e tenta o próximo
+            continue
+            
+    return resultados
 
 # --- CÁLCULO ---
 def calcular_correcao(df, valor, data_ini_code, data_fim_code):

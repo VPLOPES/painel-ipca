@@ -223,15 +223,13 @@ def get_macro_real() -> Dict:
     historico = {}
     
     for nome, codigo in Config.SERIES_MACRO.items():
-        @retry_request
-        def fetch():
-            url = f"{Config.BCB_BASE.format(codigo)}/ultimos/60?formato=json"
-            resp = requests.get(url, headers=Config.HEADERS, verify=False, timeout=10)
-            resp.raise_for_status()
-            return resp.json()
-        
         try:
-            dados = fetch()
+            # Formatação direta da URL para evitar problemas de escopo no loop
+            url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo}/dados/ultimos/60?formato=json"
+            resp = requests.get(url, headers=Config.HEADERS, verify=False, timeout=15)
+            resp.raise_for_status()
+            dados = resp.json()
+            
             if not dados:
                 continue
             
@@ -249,17 +247,22 @@ def get_macro_real() -> Dict:
             
             historico[nome] = df_chart
             
+            # Ajuste de grandezas para os KPIs
             if 'PIB' in nome:
                 val_kpi = df.iloc[-1]['valor'] / 1_000_000
             elif nome in ['Balança Com. (US$ Mi)', 'Trans. Correntes (US$ Mi)', 'IDP (US$ Mi)']:
-                val_kpi = df.iloc[-12:]['valor'].sum() / 1_000
+                # Pega a soma dos últimos 12 meses para dados de balanço/fluxo
+                val_kpi = df.iloc[-12:]['valor'].sum() / 1_000 
             elif 'Primário' in nome or 'Nominal' in nome:
                 val_kpi = df.iloc[-1]['valor'] * -1
             else:
                 val_kpi = df.iloc[-1]['valor']
             
             resultados[nome] = val_kpi
-        except:
+            
+        except Exception as e:
+            # Em vez de apenas dar "continue", imprimimos no console para você conseguir debugar
+            print(f"Erro ao carregar {nome} (Série {codigo}): {e}")
             continue
     
     return {'dados': resultados, 'historico': historico}
@@ -379,6 +382,46 @@ if st.sidebar.button("🚀 Calcular", type="primary", use_container_width=True):
 # PAINEL PRINCIPAL
 # =============================================================================
 
+st.markdown("### 🌟 Panorama de Mercado")
+
+with st.container():
+    # Coletando dados rápidos e de forma segura
+    try:
+        usd_now = get_currency_realtime().loc['USDBRL']['bid']
+    except:
+        usd_now = 0.0
+
+    try:
+        df_focus_resumo = get_focus_data()
+        ano_atual = date.today().year
+        focus_atual = df_focus_resumo[df_focus_resumo['ano_referencia'] == ano_atual]
+        
+        ipca_focus = focus_atual[focus_atual['Indicador'] == 'IPCA']['previsao'].values[0] if not focus_atual.empty else 0
+        pib_focus = focus_atual[focus_atual['Indicador'] == 'PIB Total']['previsao'].values[0] if not focus_atual.empty else 0
+    except:
+        ipca_focus, pib_focus = 0.0, 0.0
+
+    try:
+        # Busca a Meta Selic atual diretamente da série 432 do BCB
+        selic_meta_df = get_bcb_data('432')
+        selic_meta_atual = selic_meta_df.iloc[-1]['valor'] if not selic_meta_df.empty else 11.25 # fallback
+    except:
+        selic_meta_atual = 11.25 # Ajuste conforme necessidade se a API falhar
+
+    # Construindo os cards lado a lado
+    res1, res2, res3, res4 = st.columns(4)
+    
+    with res1:
+        st.metric("🎯 Meta Selic Atual", f"{selic_meta_atual:.2f}%")
+    with res2:
+        st.metric("🛒 IPCA (Focus Fim do Ano)", f"{ipca_focus:.2f}%")
+    with res3:
+        st.metric("💵 Dólar (Spot)", f"R$ {usd_now:.2f}")
+    with res4:
+        st.metric("📈 PIB (Focus Fim do Ano)", f"{pib_focus:.2f}%")
+
+st.divider()
+
 # Focus + Câmbio
 with st.expander("🔭 Expectativas (Focus) & Câmbio", expanded=False):
     col1, col2 = st.columns([2, 1])
@@ -441,6 +484,9 @@ with st.expander("🧩 Conjuntura Macroeconômica", expanded=False):
         c5.metric("Balança", f"US$ {macro_dados.get('Balança Com. (US$ Mi)', 0):.1f} Bi")
         c6.metric("Trans. Correntes", f"US$ {macro_dados.get('Trans. Correntes (US$ Mi)', 0):.1f} Bi")
         c7.metric("IDP", f"US$ {macro_dados.get('IDP (US$ Mi)', 0):.1f} Bi")
+
+    else:
+        st.warning("⚠️ Dados macroeconômicos temporariamente indisponíveis devido a instabilidade na API do Banco Central.")
 
 # Câmbio Histórico
 with st.expander("💸 Histórico de Câmbio (1994-2025)", expanded=False):

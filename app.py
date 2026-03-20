@@ -66,7 +66,10 @@ class Config:
     }
     BCB_BASE = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.{}/dados"
     FOCUS_URL = "https://olinda.bcb.gov.br/olinda/servico/Expectativas/versao/v1/odata/ExpectativasMercadoAnuais"
-    HEADERS = {'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json'}
+    HEADERS = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36', 
+        'Accept': '*/*'
+    }
     
     INDICES = {
         "IPCA (Inflação Oficial)": {"source": "sidra", "table": "1737", "variable": "63", "code": "IPCA", "color": "#00D9FF"},
@@ -404,9 +407,9 @@ with st.container():
     try:
         # Busca a Meta Selic atual diretamente da série 432 do BCB
         selic_meta_df = get_bcb_data('432')
-        selic_meta_atual = selic_meta_df.iloc[-1]['valor'] if not selic_meta_df.empty else 11.25 # fallback
+        selic_meta_atual = selic_meta_df.iloc[-1]['valor'] if not selic_meta_df.empty else 14.75 
     except:
-        selic_meta_atual = 11.25 # Ajuste conforme necessidade se a API falhar
+        selic_meta_atual = 14.75 # Atualizado para a taxa de março/2026
 
     # Construindo os cards lado a lado
     res1, res2, res3, res4 = st.columns(4)

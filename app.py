@@ -385,10 +385,91 @@ if st.sidebar.button("🚀 Calcular", type="primary", use_container_width=True):
 # PAINEL PRINCIPAL
 # =============================================================================
 
+@st.cache_data(ttl=3600)
+def obter_dados_panorama():
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    dados = {'selic': 14.75}
+    
+    def fetch_sgs(codigo):
+        url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo}/dados/ultimos/1?formato=json"
+        resp = requests.get(url, headers=headers, timeout=5, verify=False)
+        resp.raise_for_status()
+        return float(resp.json()[0]['valor'])
+
+    try: dados['selic'] = fetch_sgs(432)
+    except: pass
+    
+    return dados
+
+@st.cache_data(ttl=3600)
+def obter_meta_ipca():
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    # Meta CMN para 2026: Centro de 3.00% com teto de 4.50%
+    teto_meta = 4.50
+    
+    try:
+        # Série 433: IPCA - Variação mensal
+        url = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.433/dados/ultimos/12?formato=json"
+        resp = requests.get(url, headers=headers, timeout=5, verify=False)
+        df = pd.DataFrame(resp.json())
+        df['valor'] = pd.to_numeric(df['valor'])
+        df['data'] = pd.to_datetime(df['data'], format='%d/%m/%Y')
+        
+        ano_atual = date.today().year
+        df_ano = df[df['data'].dt.year == ano_atual]
+        
+        if df_ano.empty:
+            return {'ytd': 0.0, 'teto': teto_meta, 'pct_consumido': 0.0}
+        
+        # Cálculo de juros compostos para a inflação acumulada no ano
+        fator = 1.0
+        for val in df_ano['valor']:
+            fator *= (1 + (val / 100))
+            
+        ipca_acumulado = (fator - 1) * 100
+        pct_consumido = (ipca_acumulado / teto_meta) * 100
+        
+        return {
+            'ytd': ipca_acumulado,
+            'teto': teto_meta,
+            'pct_consumido': pct_consumido
+        }
+    except:
+        return {'ytd': 0.0, 'teto': teto_meta, 'pct_consumido': 0.0}
+
+@st.cache_data(ttl=3600)
+def obter_meta_pib(pib_focus_pct):
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    try:
+        url = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.4386/dados/ultimos/24?formato=json"
+        resp = requests.get(url, headers=headers, timeout=5, verify=False)
+        df = pd.DataFrame(resp.json())
+        df['valor'] = pd.to_numeric(df['valor'])
+        df['data'] = pd.to_datetime(df['data'], format='%d/%m/%Y')
+        df['ano'] = df['data'].dt.year
+        
+        ano_atual = df['ano'].max()
+        ano_anterior = ano_atual - 1
+        
+        pib_base_mi = df[df['ano'] == ano_anterior]['valor'].sum()
+        pib_target_mi = pib_base_mi * (1 + (pib_focus_pct / 100))
+        pib_ytd_mi = df[df['ano'] == ano_atual]['valor'].sum()
+        
+        pct_atingido = (pib_ytd_mi / pib_target_mi) * 100 if pib_target_mi > 0 else 0
+        
+        return {
+            'target_tri': pib_target_mi / 1_000_000,
+            'ytd_tri': pib_ytd_mi / 1_000_000,
+            'pct': pct_atingido
+        }
+    except Exception as e:
+        return {'target_tri': 2.31, 'ytd_tri': 0.0, 'pct': 0.0}
+
 st.markdown("### 🌟 Panorama de Mercado")
 
 with st.container():
-    # Coletando dados rápidos e de forma segura
+    dados_pan = obter_dados_panorama()
+    
     try:
         usd_now = get_currency_realtime().loc['USDBRL']['bid']
     except:
@@ -399,29 +480,33 @@ with st.container():
         ano_atual = date.today().year
         focus_atual = df_focus_resumo[df_focus_resumo['ano_referencia'] == ano_atual]
         
-        ipca_focus = focus_atual[focus_atual['Indicador'] == 'IPCA']['previsao'].values[0] if not focus_atual.empty else 0
-        pib_focus = focus_atual[focus_atual['Indicador'] == 'PIB Total']['previsao'].values[0] if not focus_atual.empty else 0
+        pib_focus = focus_atual[focus_atual['Indicador'] == 'PIB Total']['previsao'].values[0] if not focus_atual.empty else 0.0
     except:
-        ipca_focus, pib_focus = 0.0, 0.0
+        pib_focus = 0.0
+        
+    dados_pib = obter_meta_pib(pib_focus)
+    dados_ipca = obter_meta_ipca()
 
-    try:
-        # Busca a Meta Selic atual diretamente da série 432 do BCB
-        selic_meta_df = get_bcb_data('432')
-        selic_meta_atual = selic_meta_df.iloc[-1]['valor'] if not selic_meta_df.empty else 14.75 
-    except:
-        selic_meta_atual = 14.75 # Atualizado para a taxa de março/2026
-
-    # Construindo os cards lado a lado
     res1, res2, res3, res4 = st.columns(4)
     
     with res1:
-        st.metric("🎯 Meta Selic Atual", f"{selic_meta_atual:.2f}%")
+        st.metric("🎯 Meta Selic Atual", f"{dados_pan['selic']:.2f}%")
     with res2:
-        st.metric("🛒 IPCA (Focus Fim do Ano)", f"{ipca_focus:.2f}%")
+        # Utilize delta_color="inverse" para o IPCA, pois um consumo rápido do teto é negativo para a economia
+        st.metric(
+            "🛒 IPCA (Acumulado Ano vs Teto)", 
+            f"{dados_ipca['ytd']:.2f}% / {dados_ipca['teto']:.2f}%", 
+            f"{dados_ipca['pct_consumido']:.1f}% do teto consumido",
+            delta_color="inverse"
+        )
     with res3:
         st.metric("💵 Dólar (Spot)", f"R$ {usd_now:.2f}")
     with res4:
-        st.metric("📈 PIB (Focus Fim do Ano)", f"{pib_focus:.2f}%")
+        st.metric(
+            "📈 PIB (Realizado YTD vs Meta)", 
+            f"US$ {dados_pib['ytd_tri']:.2f}T / {dados_pib['target_tri']:.2f}T", 
+            f"{dados_pib['pct']:.1f}% alcançado"
+        )
 
 st.divider()
 
